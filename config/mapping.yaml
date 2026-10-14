@@ -1,0 +1,35 @@
+# 巡逻 Agent Demo · 目标类别 → 安防告警语义映射
+#
+# 对应 Spec §5.5。改规则不改代码。
+#
+# 为什么需要这一层：
+#   YOLO 只输出 COCO 类别（person / book / ...），不知道什么是「人员闯入」。
+#   detection 表存原始 COCO 输出，alert 表存映射后的业务语义，两者分离 ——
+#   这样客户追问「你凭什么说这是人员闯入」时，能拿出原始模型输出与置信度。
+
+alert_types:
+  person:
+    type: "人员闯入"
+    level: "紧急"
+    level_code: "urgent"
+    push: true
+    emoji: "👤"
+    # 「闯入」本质是行为，COCO 只给 person 框。此处是规则近似，
+    # 报表与卡片必须如实标注，不宣称具备行为识别能力。
+    note: "规则近似：点位检出 person 且置信度达标即判定，未使用时序/姿态模型"
+
+  chair:
+    type: "通道占用"
+    level: "一般"
+    level_code: "normal"
+    push: true
+    emoji: "🚧"
+    # 对应七大场景里的「通道堆堵塞」。
+    # 椅子的视觉本质是「占据通行空间的物体」，映射到通道占用比遗留物更贴切。
+    note: "代理目标：以 chair 代表占用通道的堆积物，COCO 无原生「通道占用」类别"
+
+# 检测管道参数
+detector:
+  conf_floor: 0.35          # 低于此置信度的检测结果直接丢弃，不入库
+  model: "yolov8n.pt"
+  allow_mock_fallback: true # 未安装 ultralytics 时降级为模拟检测并标注 is_mock

@@ -1,0 +1,467 @@
+# -*- coding: utf-8 -*-
+"""编排层（Spec §6.1）。
+
+    收到消息 → 载入上下文 → LLM 意图识别（tool_calls）
+            → 执行工具 → 渲染卡片 → 回复
+
+写操作的路径被刻意做成两段：`prepare_patrol_task` 只生成确认卡，
+真正的下发在用户点按钮后的 `execute_patrol_task`。
+这是「LLM 幻觉不得直接作用于物理世界」的唯一保障（Spec §6.4）。
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Any
+
+from agent_service.core import intents
+from agent_service.core.llm import LLMError, client
+from agent_service.core.memory import memory
+from agent_service.report import builder, feishu_card as fc, plain_text
+from agent_service.report.builder import AlertItem
+from agent_service.tools import patrol as T
+
+log = logging.getLogger("agent_service.orchestrator")
+
+MAX_TOOL_ROUNDS = 3
+
+
+@dataclass
+class Reply:
+    """一条要发出的消息。"""
+
+    kind: str                       # card | text | image
+    card: dict | None = None
+    text: str | None = None
+    image_path: str | None = None
+    caption: str | None = None
+    # 卡片消息发出后需要记住其 message_id（用于后续就地更新）
+    remember_as_alert_card: str | None = None   # alert_id
+
+
+@dataclass
+class ActionResult:
+    """卡片按钮回调的处理结果。"""
+
+    response_card: dict | None = None           # 回调响应里直接返回，就地更新
+    replies: list[Reply] = field(default_factory=list)
+    toast: str = "已处理"
+
+
+# ==================================================================== 工具分发
+
+
+def _alert_replies(
+    items: list[AlertItem], title: str, condition: str, chat_id: str
+) -> list[Reply]:
+    memory.remember_alerts(chat_id, [a.alert_id for a in items])
+    return [Reply(kind="card", card=fc.list_card(title, condition, items))]
+
+
+def _run_tool(name: str, args: dict, chat_id: str, user_id: str) -> list[Reply]:
+    log.info("执行工具 %s(%s)", name, json.dumps(args, ensure_ascii=False))
+
+    if name == "get_daily_report":
+        rpt = T.get_daily_report(args.get("date"))
+        return [Reply(kind="card", card=fc.report_card(rpt))]
+
+    if name == "list_alerts":
+        status = args.get("status")
+        items = T.get_alert_list(
+            status=status,
+            alert_type=args.get("alert_type"),
+            point_id=args.get("point_id"),
+            limit=int(args.get("limit") or 5),
+        )
+        cond_bits = []
+        if status:
+            cond_bits.append({"pending": "待处置", "confirmed": "已确认",
+                              "false_positive": "误报"}.get(status, status))
+        if args.get("alert_type"):
+            cond_bits.append(args["alert_type"])
+        if args.get("point_id"):
+            cond_bits.append(args["point_id"])
+        cond = "｜".join(cond_bits) or "全部告警"
+        return _alert_replies(items, "🚨 告警列表", cond, chat_id)
+
+    if name == "query_history":
+        items, cond = T.query_history(
+            days_back=int(args.get("days_back") or 7),
+            alert_type=args.get("alert_type"),
+            point_id=args.get("point_id"),
+            limit=int(args.get("limit") or 5),
+        )
+        return _alert_replies(items, "🔍 历史查询", cond, chat_id)
+
+    if name == "list_tasks":
+        tasks = T.list_tasks(status=args.get("status"), limit=int(args.get("limit") or 5))
+        if not tasks:
+            return [Reply(kind="card",
+                          card=fc.text_card("📋 任务列表", "当前没有任何任务记录。"))]
+        status_cn = {"pending": "待执行", "running": "执行中", "completed": "已完成",
+                     "cancelled": "已取消", "failed": "失败", "rejected": "已拒绝"}
+        lines = [f"共 {len(tasks)} 条："]
+        for t in tasks:
+            lines.append(
+                f"· `{t['id']}` {t['route_id']}　"
+                f"{status_cn.get(t['status'], t['status'])}　{t['created_at'][11:16]}"
+            )
+        return [Reply(kind="card", card=fc.text_card("📋 任务列表", "\n".join(lines), "blue"))]
+
+    if name == "prepare_patrol_task":
+        pa_id, rows = T.prepare_patrol_task(
+            route_id=args.get("route_id"),
+            chat_id=chat_id,
+            user_id=user_id,
+            start_at=args.get("start_at"),
+            repeat=args.get("repeat") or "once",
+        )
+        memory.remember_pending(chat_id, pa_id)
+        return [Reply(kind="card", card=fc.confirm_card("任务确认", rows, pa_id))]
+
+    if name == "cancel_task":
+        res = T.cancel_task(args.get("task_id"))
+        return [Reply(kind="card", card=fc.result_card(
+            "🗑 任务已取消",
+            f"任务 `{res['task_id']}` 已取消。",
+            ok=bool(res.get("cancelled")),
+        ))]
+
+    if name == "get_robot_status":
+        return [Reply(kind="card", card=fc.text_card("🤖 机器人状态", T.robot_status_text()))]
+
+    if name == "capture_now":
+        point_id = args.get("point_id") or T.available_points()[0].id
+        res = T.capture_now(point_id)
+        dets = res.get("detections") or []
+        desc = "、".join(f"{d['label']}={d['confidence']:.2f}" for d in dets) or "未检出目标"
+        return [
+            Reply(
+                kind="image",
+                image_path=res.get("image_path"),
+                caption=f"📷 {res.get('point_name')} 算法结果图",
+            ),
+            Reply(kind="text", text=f"检出：{desc}"),
+        ]
+
+    if name == "handle_alert":
+        alert_id = args.get("alert_id")
+        if not alert_id and args.get("index"):
+            alert_id = memory.resolve_alert_index(chat_id, int(args["index"]))
+            if not alert_id:
+                return [Reply(kind="card", card=fc.result_card(
+                    "⚠️ 找不到对应记录",
+                    "我记不清你指的是哪一条了，请重新查一次列表再处置。",
+                    ok=False,
+                ))]
+        res = T.handle_alert(alert_id, args.get("action"), user_id=user_id)
+        label = "已确认告警" if res["status"] == "confirmed" else "已标记为误报"
+        return [Reply(kind="card", card=fc.result_card(
+            f"✅ {res['alert_type']} · {label}",
+            f"告警 `{res['alert_id']}` 已处置。",
+        ))]
+
+    if name == "advance_patrol":
+        msg = T.advance_patrol()
+        return [Reply(kind="card", card=fc.text_card("⏩ 已加速", msg))]
+
+    if name == "show_help":
+        return [Reply(kind="card", card=fc.help_card())]
+
+    return [Reply(kind="text", text=f"（内部错误：没有名为 {name} 的工具）")]
+
+
+# ==================================================================== 文本入口
+
+
+def handle_text(chat_id: str, user_id: str, text: str) -> list[Reply]:
+    """处理一条用户消息，返回要发送的消息列表。"""
+    memory.add_user(chat_id, text)
+    llm = client()
+    messages = memory.messages(chat_id, intents.system_prompt())
+
+    replies: list[Reply] = []
+    for round_no in range(MAX_TOOL_ROUNDS):
+        try:
+            message, elapsed = llm.chat(messages, tools=intents.TOOLS)
+        except LLMError as exc:
+            log.error("LLM 调用失败: %s", exc)
+            return [Reply(kind="text", text=f"⚠️ 我这边出错了：{exc}")]
+
+        tool_calls = message.get("tool_calls") or []
+        if not tool_calls:
+            content = (message.get("content") or "").strip()
+            if content:
+                replies.append(Reply(kind="text", text=content))
+                memory.add_assistant(chat_id, content)
+            break
+
+        # 把 assistant 的 tool_call 也塞回上下文，保持协议完整
+        messages.append({
+            "role": "assistant",
+            "content": message.get("content") or "",
+            "tool_calls": tool_calls,
+        })
+
+        for call in tool_calls:
+            fn = call.get("function") or {}
+            name = fn.get("name") or ""
+            try:
+                args = json.loads(fn.get("arguments") or "{}")
+            except ValueError:
+                args = {}
+
+            try:
+                out = _run_tool(name, args, chat_id, user_id)
+            except T.ToolError as exc:
+                out = [Reply(kind="card", card=fc.result_card("⚠️ 操作未完成", str(exc), ok=False))]
+            except Exception as exc:  # noqa: BLE001
+                log.exception("工具 %s 执行异常", name)
+                out = [Reply(kind="card", card=fc.result_card(
+                    "⚠️ 操作未完成", f"{type(exc).__name__}: {exc}", ok=False))]
+
+            replies.extend(out)
+            messages.append({
+                "role": "tool",
+                "tool_call_id": call.get("id") or "",
+                "content": _tool_result_digest(name, out),
+            })
+
+        # 有工具结果就不再追问 LLM 生成自然语言，直接返回卡片
+        # （卡片已经承载了信息，再让 LLM 复述一遍只会重复刷屏）
+        break
+
+    # ⚠️ 只有「真正的文本回复」才写入对话历史。
+    #
+    # 这里踩过两次坑：最初把卡片渲染成 `[卡片] 标题` 写进 assistant 轮次，
+    # LLM 把它当成输出格式，回复用户一句 `[卡片] 🚀 巡逻任务确认`（没有数据）。
+    # 改成 `（已向用户展示卡片「…」）` 之后仍然被照抄，甚至凭空编出
+    # 「📷 点位抓拍」这种不存在的卡片标题。
+    #
+    # 结论：任何描述「我刚才展示了卡片」的文字，只要进了 assistant 轮次，
+    # 就会被当成可模仿的模板。所以卡片/图片一律不写历史 ——
+    # 指代消解（「第 2 条是误报」）靠 memory 里的告警 ID 列表，不依赖这段文字。
+    text_reply = next((r.text for r in replies if r.kind == "text" and r.text), None)
+    if text_reply:
+        memory.add_assistant(chat_id, text_reply)
+    return replies
+
+
+def _tool_result_digest(name: str, replies: list[Reply]) -> str:
+    kinds = [r.kind for r in replies]
+    return json.dumps({"tool": name, "rendered": kinds, "ok": True}, ensure_ascii=False)
+
+
+# ==================================================================== 按钮回调
+
+
+def handle_card_action(chat_id: str, user_id: str, value: dict) -> ActionResult:
+    """处理卡片按钮回调。返回的 response_card 会被就地写回原卡片。"""
+    act = (value or {}).get("act") or ""
+    log.info("卡片动作 %s %s", act, json.dumps(value, ensure_ascii=False)[:200])
+
+    try:
+        if act == fc.ACT_TASK_CONFIRM:
+            res = T.execute_patrol_task(value["pa_id"], user_id=user_id)
+            card = fc.result_card(
+                "✅ 任务已下发",
+                f"任务号：`{res['task_id']}`\n"
+                f"路线：{res['route_name']}\n"
+                f"点位：{' → '.join(res['points'])}\n\n"
+                "机器人已出发，完成后会自动推送结果。",
+            )
+            memory.remember_pending(chat_id, "")
+            return ActionResult(response_card=card, toast="任务已下发")
+
+        if act == fc.ACT_TASK_CANCEL:
+            T.cancel_pending(value["pa_id"])
+            memory.remember_pending(chat_id, "")
+            card = fc.result_card("❌ 已取消", "没有下发任何任务。", ok=False)
+            return ActionResult(response_card=card, toast="已取消")
+
+        if act == fc.ACT_TASK_MODIFY:
+            return ActionResult(
+                response_card=fc.text_card(
+                    "✏️ 修改时间",
+                    "请直接发消息告诉我新时间，例如：\n「今晚 10 点巡逻」「明天早上 8 点」",
+                ),
+                toast="请回复新时间",
+            )
+
+        if act in (fc.ACT_ALERT_CONFIRM, fc.ACT_ALERT_FALSE):
+            alert_id = value["alert_id"]
+            action = "confirm" if act == fc.ACT_ALERT_CONFIRM else "false_positive"
+            res = T.handle_alert(alert_id, action, user_id=user_id)
+            row = _reload_alert(alert_id)
+            if row:
+                card = fc.alert_resolved_card(
+                    row,
+                    handled_by=user_id or "飞书用户",
+                    handled_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                )
+            else:
+                label = "已确认" if res["status"] == "confirmed" else "已标记误报"
+                card = fc.result_card(f"✅ {res['alert_type']} · {label}",
+                                      f"告警 `{alert_id}` 已处置。")
+            return ActionResult(response_card=card, toast="已处置")
+
+        # 以下三个是「下钻」动作：发新消息，不销毁用户正在看的原卡片
+        if act == fc.ACT_ALERT_DETAIL:
+            row = _reload_alert(value["alert_id"])
+            if not row:
+                return ActionResult(response_card=fc.result_card(
+                    "⚠️ 找不到该告警", "记录可能已被清理。", ok=False))
+            body = (
+                f"告警号：`{row.alert_id}`\n"
+                f"类型：{row.alert_type}（{row.level}）\n"
+                f"点位：{row.point_name}\n"
+                f"时间：{row.created_at}\n"
+                f"状态：{row.status_label}\n\n"
+                f"**原始模型输出**：`{row.coco_label}` @ {row.confidence:.4f}\n"
+                f"数据来源：{'模拟检测' if row.is_mock else 'YOLO 真实推理'}\n"
+                f"结果图（带检测框）：`{row.image_path or '未留存'}`\n"
+                f"原始帧（未绘制）：`{row.raw_image_path or '未留存'}`"
+            )
+            return ActionResult(
+                replies=[Reply(kind="card", card=fc.text_card("🔎 告警详情", body))],
+                toast="",
+            )
+
+        if act == fc.ACT_ALERTS_MORE:
+            items = T.get_alert_list(status=value.get("status"), limit=5)
+            memory.remember_alerts(chat_id, [a.alert_id for a in items])
+            return ActionResult(
+                replies=[Reply(kind="card",
+                               card=fc.list_card("🚨 告警列表", "待处置", items))],
+                toast="",
+            )
+
+        if act == "history":
+            items, cond = T.query_history(days_back=int(value.get("days") or 7), limit=5)
+            memory.remember_alerts(chat_id, [a.alert_id for a in items])
+            return ActionResult(
+                replies=[Reply(kind="card", card=fc.list_card("🔍 历史查询", cond, items))],
+                toast="",
+            )
+
+        if act == fc.ACT_ADVANCE:
+            return ActionResult(response_card=fc.text_card("⏩ 已加速", T.advance_patrol()),
+                                toast="已加速")
+
+        if act == "export":
+            return ActionResult(
+                response_card=fc.text_card(
+                    "📄 导出功能不在本版本",
+                    "导出 CSV 计划在下一版提供。当前可以先查看列表或历史查询结果。",
+                ),
+                toast="暂不支持",
+            )
+
+        if act == fc.ACT_HELP:
+            return ActionResult(response_card=fc.help_card(), toast="")
+
+        return ActionResult(
+            response_card=fc.result_card("⚠️ 未知操作", f"不认识的按钮动作：{act}", ok=False),
+            toast="未知操作",
+        )
+
+    except T.ToolError as exc:
+        return ActionResult(response_card=fc.result_card("⚠️ 操作未完成", str(exc), ok=False),
+                            toast="操作未完成")
+    except Exception as exc:  # noqa: BLE001
+        log.exception("卡片动作 %s 异常", act)
+        return ActionResult(
+            response_card=fc.result_card("⚠️ 操作未完成", f"{type(exc).__name__}: {exc}", ok=False),
+            toast="出错",
+        )
+
+
+def _reload_alert(alert_id: str) -> AlertItem | None:
+    from shared import repo
+
+    row = repo.get_alert(alert_id)
+    if not row:
+        return None
+    from agent_service.report.builder import _to_alert_item
+
+    return _to_alert_item(row)
+
+
+# ==================================================================== 告警推送
+
+
+def build_alert_reply(alert_id: str) -> Reply | None:
+    """机器人回调触发的告警推送。"""
+    row = _reload_alert(alert_id)
+    if not row:
+        log.warning("告警 %s 不存在，无法推送", alert_id)
+        return None
+    return Reply(
+        kind="card",
+        card=fc.alert_card(row),
+        remember_as_alert_card=alert_id,
+    )
+
+
+def build_run_finished_reply(summary: dict) -> Reply:
+    status_cn = {"completed": "✅ 已完成", "failed": "❌ 失败", "cancelled": "⛔ 已取消"}
+    alerts = summary.get("alert_ids") or []
+    body = (
+        f"轮次：`{summary.get('run_id')}`\n"
+        f"状态：{status_cn.get(summary.get('status'), summary.get('status'))}\n"
+        f"点位：{summary.get('points_done')}/{summary.get('points_total')}\n"
+        f"本次告警：{len(alerts)} 条"
+    )
+    if summary.get("error"):
+        body += f"\n\n错误：{summary['error']}"
+    if alerts:
+        body += "\n\n" + "\n".join(f"· `{a}`" for a in alerts)
+    return Reply(kind="card", card=fc.text_card(
+        "🏁 巡逻轮次结束", body,
+        "green" if summary.get("status") == "completed" else "orange",
+    ))
+
+
+# ==================================================================== 纯文本（微信）
+
+
+def handle_text_plain(chat_id: str, user_id: str, text: str) -> list[str]:
+    """微信降级入口：同样的意图，输出纯文本。"""
+    replies = handle_text(chat_id, user_id, text)
+    out: list[str] = []
+    for r in replies:
+        if r.kind == "text":
+            out.append(r.text or "")
+        elif r.kind == "card":
+            out.append(_card_to_text(r.card or {}))
+        elif r.kind == "image":
+            out.append(r.caption or "[图片]")
+    return [t for t in out if t]
+
+
+def _card_to_text(card: dict) -> str:
+    header = ((card.get("header") or {}).get("title") or {}).get("content") or "卡片"
+    lines = [str(header), "━" * 16]
+    for el in card.get("elements") or []:
+        tag = el.get("tag")
+        if tag == "div":
+            lines.append((el.get("text") or {}).get("content") or "")
+        elif tag == "note":
+            for sub in el.get("elements") or []:
+                lines.append(f"（{sub.get('content', '')}）")
+        elif tag == "column_set":
+            cells = []
+            for col in el.get("columns") or []:
+                for sub in col.get("elements") or []:
+                    cells.append(((sub.get("text") or {}).get("content") or "").replace("\n", " "))
+            lines.append("　｜　".join(cells))
+        elif tag == "action":
+            labels = [((b.get("text") or {}).get("content") or "") for b in el.get("actions") or []]
+            lines.append("")
+            lines.append("选项：" + "　".join(f"{i}) {l}" for i, l in enumerate(labels, 1)))
+        elif tag == "hr":
+            lines.append("━" * 16)
+    return "\n".join(x for x in lines if x is not None)

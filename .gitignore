@@ -1,0 +1,32 @@
+# ============================================================
+# 巡逻 Agent Demo · 忽略规则
+# ============================================================
+
+# ⚠️ 密钥与本地配置 —— 绝对不能提交
+config/config.yaml
+
+# 运行产物
+# 注意：.gitignore 只认行首的 # 作注释，行尾注释会让整条模式失效（踩过）
+data/
+logs/
+*.db
+*.sqlite3
+*.log
+
+# 模型权重（yolov8n.pt 约 6MB，首次运行自动下载）
+models/
+*.pt
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+*.egg-info/
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

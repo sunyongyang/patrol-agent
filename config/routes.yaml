@@ -1,0 +1,43 @@
+# 巡逻 Agent Demo · 路线与点位定义
+#
+# 对应 Spec §5.2：2 个点位，共用同一台摄像头，差异只在业务标签。
+# 点位 → 目标类别 → 告警语义的映射在 mapping.yaml。
+
+robot:
+  id: "R-01"
+  name: "巡逻机器人 R-01"
+  model: "PATROL-DEMO-01"
+  initial_battery: 92.0
+
+camera:
+  index: 0
+  width: 1280
+  height: 720
+  warmup_frames: 5          # 打开摄像头后丢弃的前几帧（自动曝光未稳定）
+
+# 每个点位只关心自己的 target_label，其他类别仍落库但不生成告警
+points:
+  - id: "P1"
+    name: "东侧通道"
+    area: "一层东侧"
+    target_label: "person"
+    conf_threshold: 0.60
+    zone: null              # 预留：禁区多边形 [[x,y],...]，用于「越界闯入」判定
+  - id: "P2"
+    name: "西侧通道"
+    area: "一层西侧"
+    target_label: "chair"
+    # 实测 chair 置信度在 0.35~0.72 间波动（远高于 book 的检不出）。
+    # 阈值定 0.45 以保证演示时稳定触发；想降噪就往上调。
+    conf_threshold: 0.45
+    zone: null
+
+routes:
+  - id: "standard_patrol"
+    name: "标准巡检路线"
+    description: "两个点位的日常巡检"
+    points:
+      - point_id: "P1"
+        dwell_sec: 30       # 就位窗口：现场人员在此时间内走到镜头前
+      - point_id: "P2"
+        dwell_sec: 30       # 就位窗口：现场人员在此时间内放书并退开

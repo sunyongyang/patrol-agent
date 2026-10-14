@@ -1,0 +1,24 @@
+# 巡逻 Agent Demo · Python 依赖
+#
+# 安装：
+#   .venv\Scripts\python.exe -m pip install -r requirements.txt
+#
+# ⚠️ 必须用项目自己的 .venv，不要用 PATH 里的 python
+#    （本机 PATH 里的 python 指向 hermes-agent 的 venv，装大包会污染它）
+
+# --- IM 通道（飞书长连接）---
+lark-oapi>=1.7
+
+# --- 基础 ---
+pyyaml>=6.0
+requests>=2.31
+pillow>=10.0
+
+# --- Web 服务（M1 机器人模拟器 / M3 Agent 服务）---
+fastapi>=0.110
+uvicorn[standard]>=0.27
+
+# --- 视觉检测（M1；会带入 torch，CPU 版约 1-2GB）---
+# 目前用真实推理 + 摄像头，装之前先确认磁盘空间
+# opencv-python>=4.9
+# ultralytics>=8.1
