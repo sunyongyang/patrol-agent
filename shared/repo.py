@@ -238,18 +238,71 @@ def insert_alert(
     level_code: str,
     alert_type: str,
     status: str = "pending",
+    target_count: int = 1,
 ) -> str:
     with connect() as conn:
         alert_id = next_id(conn, "alert", "A")
+        ts = now_iso()
         conn.execute(
             """
             INSERT INTO alert (id, detection_id, level, level_code, alert_type,
-                               status, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+                               status, occurrence_count, target_count, last_seen_at, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
             """,
-            (alert_id, detection_id, level, level_code, alert_type, status, now_iso()),
+            (alert_id, detection_id, level, level_code, alert_type, status,
+             max(1, int(target_count)), ts, ts),
         )
         return alert_id
+
+
+def find_open_alert(
+    point_id: str, alert_type: str, window_minutes: int
+) -> dict | None:
+    """找同点位、同类型、窗口内且**未处置**的告警 —— 用于抑制重复告警。
+
+    判定基准用 `COALESCE(last_seen_at, created_at)`：
+    只要目标持续出现（每次都被刷新），就一直算在窗口内，告警持续累加而不新建；
+    目标消失超过窗口后再出现，才算新事件。
+    """
+    since = (datetime.now() - timedelta(minutes=window_minutes)).isoformat(timespec="seconds")
+    with connect() as conn:
+        row = conn.execute(
+            """
+            SELECT a.*, d.point_id, d.coco_label, d.confidence, d.image_path
+            FROM alert a JOIN detection d ON d.id = a.detection_id
+            WHERE a.status = 'pending'
+              AND a.alert_type = ?
+              AND d.point_id = ?
+              AND COALESCE(a.last_seen_at, a.created_at) >= ?
+            ORDER BY COALESCE(a.last_seen_at, a.created_at) DESC
+            LIMIT 1
+            """,
+            (alert_type, point_id, since),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def touch_alert(
+    alert_id: str, detection_id: str | None = None, target_count: int | None = None
+) -> dict:
+    """抑制时刷新既有告警：次数 +1、更新时间，并把证据换成最新一次。
+
+    把 detection_id 指向最新检测是有意的 —— 卡片上展示的应该是**最近一次**的
+    抓拍与置信度，而不是第一次的。这样值班员看到的画面始终是当前的。
+    """
+    with connect() as conn:
+        sets = ["occurrence_count = occurrence_count + 1", "last_seen_at = ?"]
+        params: list[Any] = [now_iso()]
+        if detection_id:
+            sets.append("detection_id = ?")
+            params.append(detection_id)
+        if target_count is not None:
+            sets.append("target_count = ?")
+            params.append(max(1, int(target_count)))
+        params.append(alert_id)
+        conn.execute(f"UPDATE alert SET {', '.join(sets)} WHERE id=?", params)
+        row = conn.execute("SELECT * FROM alert WHERE id=?", (alert_id,)).fetchone()
+        return dict(row) if row else {}
 
 
 def get_alert(alert_id: str) -> dict | None:
@@ -266,12 +319,22 @@ def get_alert(alert_id: str) -> dict | None:
         return dict(row) if row else None
 
 
-def update_alert_status(alert_id: str, status: str, handled_by: str = "") -> bool:
+def update_alert_status(
+    alert_id: str, status: str, handled_by: str = "", resolution_note: str | None = None
+) -> bool:
+    """处置告警。resolution_note 存「怎么处理的」—— 这是经验复用与 RAG 的前置。"""
     with connect() as conn:
-        cur = conn.execute(
-            "UPDATE alert SET status=?, handled_by=?, handled_at=? WHERE id=?",
-            (status, handled_by, now_iso(), alert_id),
-        )
+        if resolution_note is None:
+            cur = conn.execute(
+                "UPDATE alert SET status=?, handled_by=?, handled_at=? WHERE id=?",
+                (status, handled_by, now_iso(), alert_id),
+            )
+        else:
+            cur = conn.execute(
+                "UPDATE alert SET status=?, handled_by=?, handled_at=?, resolution_note=? "
+                "WHERE id=?",
+                (status, handled_by, now_iso(), resolution_note, alert_id),
+            )
         return cur.rowcount > 0
 
 
@@ -319,8 +382,28 @@ def list_alerts(
         return [dict(r) for r in conn.execute(sql, params).fetchall()]
 
 
+def list_alerts_by_ids(ids: list[str]) -> list[dict]:
+    """按告警号取记录，用于「导出卡片上列出的这几条」。"""
+    if not ids:
+        return []
+    marks = ",".join("?" * len(ids))
+    sql = f"""
+        SELECT a.*, d.coco_label, d.confidence, d.image_path, d.raw_image_path, d.is_mock,
+               d.point_id, d.run_id, d.created_at AS detected_at
+        FROM alert a JOIN detection d ON d.id = a.detection_id
+        WHERE a.id IN ({marks})
+        ORDER BY a.created_at DESC
+    """
+    with connect() as conn:
+        return [dict(r) for r in conn.execute(sql, list(ids)).fetchall()]
+
+
 def alert_counts(since: str, until: str) -> dict[str, int]:
-    """按状态统计告警数，报表用。"""
+    """按状态统计告警数，报表用。
+
+    只统计三种主要状态。`merged`（历史重复告警合并后的存档）与 `expired`
+    必须排除在 total 之外，否则报表会重复计数。
+    """
     with connect() as conn:
         rows = conn.execute(
             "SELECT status, COUNT(*) AS n FROM alert WHERE created_at >= ? AND created_at <= ? "
@@ -329,9 +412,93 @@ def alert_counts(since: str, until: str) -> dict[str, int]:
         ).fetchall()
         out = {"pending": 0, "confirmed": 0, "false_positive": 0}
         for r in rows:
-            out[r["status"]] = r["n"]
-        out["total"] = sum(out.values())
+            if r["status"] in out:
+                out[r["status"]] = r["n"]
+        out["total"] = out["pending"] + out["confirmed"] + out["false_positive"]
         return out
+
+
+def merge_duplicate_alerts(window_minutes: int = 30) -> list[dict]:
+    """合并历史上因缺少抑制而产生的重复告警（维护操作）。
+
+    背景：在引入告警抑制之前，同一个目标每次巡逻都会新建一条告警。
+    实测 10 条真实告警里 9 条是同一个人在同一个点位的重复。
+
+    规则：同一 (点位, 告警类型) 的一串 pending 告警，相邻两次间隔小于
+    window_minutes 的视为同一次事件，合并到最早那条：
+        - occurrence_count 累加
+        - last_seen_at 取最后时间，detection_id 指向最后一次的检测（证据用最新画面）
+        - 其余标记 status='merged'（**保留记录不删除**，可审计）
+
+    返回合并摘要。
+    """
+    expect_label = {}  # point_id + alert_type -> 不校验，直接按 point/type 分组
+    merged: list[dict] = []
+
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT a.id, a.alert_type, a.created_at, a.last_seen_at, a.detection_id,
+                   a.occurrence_count, d.point_id, d.confidence
+            FROM alert a JOIN detection d ON d.id = a.detection_id
+            WHERE a.status = 'pending'
+            ORDER BY d.point_id, a.alert_type, a.created_at
+            """
+        ).fetchall()
+
+        groups: dict[tuple[str, str], list] = {}
+        for r in rows:
+            groups.setdefault((r["point_id"], r["alert_type"]), []).append(r)
+
+        for (point_id, alert_type), items in groups.items():
+            chain: list = []
+            for item in items:
+                if not chain:
+                    chain = [item]
+                    continue
+                prev = chain[-1]
+                prev_seen = prev["last_seen_at"] or prev["created_at"]
+                gap_min = _minutes_between(prev_seen, item["created_at"])
+                if gap_min is not None and gap_min <= window_minutes:
+                    chain.append(item)
+                else:
+                    _flush_chain(conn, chain, point_id, alert_type, merged)
+                    chain = [item]
+            if chain:
+                _flush_chain(conn, chain, point_id, alert_type, merged)
+
+    return merged
+
+
+def _minutes_between(a_iso: str, b_iso: str) -> float | None:
+    try:
+        return (datetime.fromisoformat(b_iso) - datetime.fromisoformat(a_iso)).total_seconds() / 60
+    except (ValueError, TypeError):
+        return None
+
+
+def _flush_chain(conn, chain: list, point_id: str, alert_type: str,
+                 merged: list[dict]) -> None:
+    if len(chain) < 2:
+        return
+    head, last = chain[0], chain[-1]
+    # 累加各条已有的 occurrence_count，而不是数链条长度 ——
+    # 链条里可能已经有被抑制过的告警（count > 1），数长度会把这部分丢掉。
+    total = sum(int(item["occurrence_count"] or 1) for item in chain)
+    conn.execute(
+        """UPDATE alert SET occurrence_count=?, last_seen_at=?, detection_id=?
+           WHERE id=?""",
+        (total, last["last_seen_at"] or last["created_at"], last["detection_id"], head["id"]),
+    )
+    for item in chain[1:]:
+        conn.execute("UPDATE alert SET status='merged' WHERE id=?", (item["id"],))
+    merged.append({
+        "kept": head["id"],
+        "point_id": point_id,
+        "alert_type": alert_type,
+        "merged_count": len(chain) - 1,
+        "occurrence_count": total,
+    })
 
 
 def alert_type_breakdown(since: str, until: str) -> list[dict]:
@@ -348,7 +515,18 @@ def alert_type_breakdown(since: str, until: str) -> list[dict]:
 
 
 def run_stats(since: str, until: str) -> dict:
-    """日报用的轮次统计（Spec §6.5）。"""
+    """日报用的轮次统计（Spec §6.5）。
+
+    指标命名刻意区分开，避免误导：
+        captures      = 完成的点位数 = **实际拍照次数**
+        detections    = detection 表行数 = **检出目标数**（没检出东西的那次不产生行）
+        之前把 detections 标成「检测记录 N 条」，会被读成「检测了 N 次」——
+        实际拍照 26 次、检出 55 个目标时，那个数字是错的。
+
+        path_completion_rate = 已完成点位 / 应巡点位。
+        **这不是「巡逻覆盖率」** —— 后者按 KPI 定义还含时间维度。
+        名字必须叫准，否则客户按他们的定义理解，一问就穿帮。
+    """
     with connect() as conn:
         row = conn.execute(
             """
@@ -364,24 +542,40 @@ def run_stats(since: str, until: str) -> dict:
         completed = row["completed"] or 0
         pts_total = row["pts_total"] or 0
         pts_done = row["pts_done"] or 0
-        detection_count = conn.execute(
-            "SELECT COUNT(*) AS n FROM detection WHERE created_at >= ? AND created_at <= ?",
+
+        counts = conn.execute(
+            """
+            SELECT COUNT(*) AS n,
+                   SUM(CASE WHEN is_mock=1 THEN 1 ELSE 0 END) AS mock
+            FROM detection WHERE created_at >= ? AND created_at <= ?
+            """,
             (since, until),
-        ).fetchone()["n"]
-        mock_count = conn.execute(
-            "SELECT COUNT(*) AS n FROM detection WHERE is_mock=1 AND created_at >= ? AND created_at <= ?",
+        ).fetchone()
+        detections = counts["n"] or 0
+        mock = counts["mock"] or 0
+
+        # 轮次层面也区分真假：一个轮次只要含真实推理检测就算「有真实数据」
+        runs_with_real = conn.execute(
+            """
+            SELECT COUNT(DISTINCT r.id) AS n
+            FROM patrol_run r JOIN detection d ON d.run_id = r.id
+            WHERE r.started_at >= ? AND r.started_at <= ? AND d.is_mock = 0
+            """,
             (since, until),
-        ).fetchone()["n"]
+        ).fetchone()["n"] or 0
 
     return {
         "runs_total": total,
         "runs_completed": completed,
         "completion_rate": round(completed / total * 100, 1) if total else 0.0,
+        "runs_with_real_data": runs_with_real,
         "points_total": pts_total,
         "points_done": pts_done,
-        "coverage_rate": round(pts_done / pts_total * 100, 1) if pts_total else 0.0,
-        "detections": detection_count,
-        "mock_detections": mock_count,
+        "captures": pts_done,
+        "path_completion_rate": round(pts_done / pts_total * 100, 1) if pts_total else 0.0,
+        "detections": detections,
+        "real_detections": detections - mock,
+        "mock_detections": mock,
     }
 
 

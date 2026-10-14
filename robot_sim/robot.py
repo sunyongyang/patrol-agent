@@ -23,11 +23,12 @@ import requests
 
 from robot_sim.annotate import annotate
 from robot_sim.camera import Camera, CameraError, new_basename, save_jpeg
-from robot_sim.detectors.base import Detector
+from robot_sim.detectors.base import Detection, Detector
 from robot_sim.mapper import evaluate
 from shared import IMAGE_DIR, repo
 from shared.db import now_iso
-from shared.scene import Point, Route, point as get_point, robot as robot_profile, route as get_route
+from shared.scene import Point, Route, alert_policy, point as get_point, robot as robot_profile
+from shared.scene import route as get_route
 
 log = logging.getLogger("robot_sim.robot")
 
@@ -272,22 +273,23 @@ class VirtualRobot:
         )
         image_path = save_jpeg(annotated, IMAGE_DIR / f"{base}.jpg")
 
-        # 全类别落库（保留原始证据），点位过滤只影响是否产生告警
-        detection_ids: list[str] = []
+        # 全类别落库（保留原始证据），点位过滤只影响是否产生告警。
+        # 必须记住「哪一个 Detection 对象对应哪一条 detection 记录」——
+        # 告警只能关联到**触发它的那一条**，不能拿列表第一个凑数。
+        detection_rows: list[tuple[Detection, str]] = []
         if record:
             for d in detections:
-                detection_ids.append(
-                    repo.insert_detection(
-                        run_id=run_id or "manual",
-                        point_id=pt.id,
-                        coco_label=d.label,
-                        confidence=d.confidence,
-                        bbox=d.bbox,
-                        image_path=image_path,
-                        raw_image_path=raw_path,
-                        is_mock=self.detector.is_mock,
-                    )
+                det_id = repo.insert_detection(
+                    run_id=run_id or "manual",
+                    point_id=pt.id,
+                    coco_label=d.label,
+                    confidence=d.confidence,
+                    bbox=d.bbox,
+                    image_path=image_path,
+                    raw_image_path=raw_path,
+                    is_mock=self.detector.is_mock,
                 )
+                detection_rows.append((d, det_id))
 
         decisions = evaluate(pt, detections)
         result: dict[str, Any] = {
@@ -306,22 +308,64 @@ class VirtualRobot:
 
         if decisions:
             dec = decisions[0]
+            policy = alert_policy()
             if record:
-                alert_id = repo.insert_alert(
-                    detection_id=detection_ids[0] if detection_ids else "",
-                    level=dec.level,
-                    level_code=dec.level_code,
-                    alert_type=dec.alert_type,
+                # 按「对象身份」匹配触发告警的那条检测，而不是取下标 0。
+                # 曾经的写法 detection_ids[0] 在 P2 上会错位：
+                # 检出 [person 0.92, chair 0.46]，告警是 chair，却关联到了 person ——
+                # 卡片上于是出现「通道占用 · 原始输出 person 0.92」这种自相矛盾的显示。
+                matched_id = next(
+                    (did for d, did in detection_rows if d is dec.detection),
+                    detection_rows[0][1] if detection_rows else "",
                 )
-                result["alert_id"] = alert_id
-                result["alert_type"] = dec.alert_type
-                result["level"] = dec.level
-                result["confidence"] = round(dec.detection.confidence, 4)
-                result["coco_label"] = dec.detection.label
-                result["detected_at"] = now_iso()
-                log.info("[%s] ★ 告警 %s（%s）conf=%.3f",
-                         run_id or "manual", dec.alert_type, dec.level,
-                         dec.detection.confidence)
+
+                result.update(
+                    alert_type=dec.alert_type,
+                    level=dec.level,
+                    confidence=round(dec.detection.confidence, 4),
+                    coco_label=dec.detection.label,
+                    target_count=dec.count,
+                    detected_at=now_iso(),
+                )
+
+                # —— 告警抑制 ——
+                # 同一目标持续存在时，每轮巡逻都新建告警会把值班员淹没。
+                # 实测：10 条真实告警里 9 条是同一个人在同一个点位的重复报警。
+                existing = repo.find_open_alert(
+                    pt.id, dec.alert_type, policy.suppress_minutes
+                )
+                if existing:
+                    updated = repo.touch_alert(
+                        existing["id"], detection_id=matched_id, target_count=dec.count
+                    )
+                    count = int(updated.get("occurrence_count")
+                                or existing.get("occurrence_count", 1) + 1)
+                    result["alert_id"] = existing["id"]
+                    result["suppressed"] = True
+                    result["occurrence_count"] = count
+                    result["first_seen_at"] = existing["created_at"]
+                    result["card_message_id"] = existing.get("card_message_id") or ""
+                    log.info(
+                        "[%s] 抑制重复告警：%s「%s」累加至第 %d 次（首次 %s）",
+                        run_id or "manual", existing["id"], dec.alert_type,
+                        count, existing["created_at"][11:19],
+                    )
+                else:
+                    alert_id = repo.insert_alert(
+                        detection_id=matched_id,
+                        level=dec.level,
+                        level_code=dec.level_code,
+                        alert_type=dec.alert_type,
+                        target_count=dec.count,
+                    )
+                    result["alert_id"] = alert_id
+                    result["suppressed"] = False
+                    result["occurrence_count"] = 1
+                    result["first_seen_at"] = result["detected_at"]
+                    result["card_message_id"] = ""
+                    log.info("[%s] ★ 新告警 %s（%s）%s ×%d conf=%.3f",
+                             run_id or "manual", dec.alert_type, dec.level,
+                             dec.detection.label, dec.count, dec.detection.confidence)
 
         return result
 
@@ -339,6 +383,12 @@ class VirtualRobot:
             "run_id": result.get("run_id"),
             "image_path": result.get("image_path"),
             "detected_at": result.get("detected_at"),
+            # 抑制信息：让 Agent 服务决定「就地刷新原卡片」还是「发新卡片」
+            "suppressed": result.get("suppressed", False),
+            "occurrence_count": result.get("occurrence_count", 1),
+            "target_count": result.get("target_count", 1),
+            "first_seen_at": result.get("first_seen_at"),
+            "card_message_id": result.get("card_message_id") or "",
         }
         try:
             resp = requests.post(

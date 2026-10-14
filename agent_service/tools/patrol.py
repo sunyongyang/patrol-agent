@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
+from pathlib import Path
 
 import requests
 
@@ -60,11 +61,24 @@ def query_history(
     days_back: int = 7,
     alert_type: str | None = None,
     point_id: str | None = None,
+    status: str | None = None,
     limit: int = 5,
 ) -> tuple[list[AlertItem], str]:
     return builder.query_history(
-        days_back=days_back, alert_type=alert_type, point_id=point_id, limit=limit
+        days_back=days_back, alert_type=alert_type, point_id=point_id,
+        status=status, limit=limit,
     )
+
+
+def alerts_by_ids(ids: list[str]) -> list[AlertItem]:
+    return builder.alerts_by_ids(ids)
+
+
+def build_export(items: list[AlertItem], condition: str = "") -> Path:
+    """生成 CSV 文件，返回路径。"""
+    from agent_service.report import csv_export
+
+    return csv_export.build_csv(items, condition)
 
 
 def list_tasks(status: str | None = None, limit: int = 5) -> list[dict]:
@@ -159,12 +173,14 @@ def prepare_patrol_task(
     route_id: str | None,
     chat_id: str,
     user_id: str,
-    start_at: str | None = None,
-    repeat: str = "once",
 ) -> tuple[str, list[tuple[str, str]]]:
     """准备下发任务：落 pending_action 并返回确认卡的字段行。
 
     这里**不会**碰机器人。真正下发在 execute_patrol_task。
+
+    关于定时：`task.start_at` / `repeat_cron` 字段保留在表里，
+    但本版本**没有任何调度器读取它们**。所以这里不暴露时间参数 ——
+    与其让确认卡显示一个不会生效的 22:00，不如如实说只支持立即执行。
     """
     routes = available_routes()
     if not routes:
@@ -181,25 +197,17 @@ def prepare_patrol_task(
 
     name, chain, seconds = _route_summary(route)
 
-    if start_at:
-        time_desc = start_at
-    else:
-        time_desc = "立即执行一次"
-    if repeat and repeat not in ("once", "None", ""):
-        time_desc += f"（重复：{repeat}）"
-
     payload = {
         "route_id": route.id,
         "route_name": name,
-        "start_at": start_at,
-        "repeat": repeat,
         "robot_id": robot_profile().id,
+        "execute": "immediate",
     }
     pa_id = repo.save_pending_action(chat_id, user_id, "task.create", payload)
 
     rows = [
         ("路线", f"{name}（{len(route.points)} 个点位）"),
-        ("时间", time_desc),
+        ("时间", "立即执行一次"),
         ("预计", f"约 {max(1, round(seconds / 60))} 分钟"),
         ("点位", chain),
     ]
@@ -274,10 +282,15 @@ def cancel_task(task_id: str | None = None) -> dict:
     return {"task_id": task_id, **resp.json()}
 
 
-def handle_alert(alert_id: str, action: str, user_id: str = "") -> dict:
+def handle_alert(
+    alert_id: str, action: str, user_id: str = "", note: str = ""
+) -> dict:
     """处置告警：action = confirm | false_positive。
 
     按钮点击本身就是「二次确认」，所以这里直接执行。
+
+    `note` 存「怎么处理的」。没有它，事后只能看到「某人某时处置过」，
+    完全无法复用处置经验 —— 这也是将来做「上次类似情况怎么处理的」的前置条件。
     """
     alert = repo.get_alert(alert_id)
     if not alert:
@@ -290,7 +303,7 @@ def handle_alert(alert_id: str, action: str, user_id: str = "") -> dict:
     if alert["status"] != "pending":
         raise ToolError(f"这条告警已经是「{alert['status']}」状态了。")
 
-    ok = repo.update_alert_status(alert_id, status, handled_by=user_id)
+    ok = repo.update_alert_status(alert_id, status, handled_by=user_id, resolution_note=note)
     if not ok:
         raise ToolError(f"更新告警 {alert_id} 失败。")
 
@@ -301,6 +314,7 @@ def handle_alert(alert_id: str, action: str, user_id: str = "") -> dict:
         "coco_label": alert.get("coco_label"),
         "confidence": alert.get("confidence"),
         "point_id": alert.get("point_id"),
+        "note": note,
     }
 
 

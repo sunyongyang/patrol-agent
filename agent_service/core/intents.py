@@ -99,6 +99,9 @@ TOOLS: list[dict] = [
             "description": (
                 "准备下发一次巡逻任务。**只生成确认卡，不会真的下发**。"
                 "用户点确认后才执行。任何「让机器人去巡逻」的请求都走这个工具。"
+                "注意：本版本**只支持立即执行**，不支持定时或重复巡逻。"
+                "如果用户要求「今晚10点」或「每天」，如实告知当前做不到，"
+                "不要假装设置成功。"
             ),
             "parameters": {
                 "type": "object",
@@ -106,18 +109,6 @@ TOOLS: list[dict] = [
                     "route_id": {
                         "type": "string",
                         "description": "路线 ID。用户没指明就不传，默认用标准路线",
-                    },
-                    "start_at": {
-                        "type": "string",
-                        "description": (
-                            "ISO8601 开始时间，如 2026-10-14T22:00:00。"
-                            "用户说「现在/马上」就不传。「今晚10点」要换算成具体日期时间"
-                        ),
-                    },
-                    "repeat": {
-                        "type": "string",
-                        "enum": ["once", "daily"],
-                        "description": "默认 once",
                     },
                 },
             },
@@ -189,8 +180,47 @@ TOOLS: list[dict] = [
                         "enum": ["confirm", "false_positive"],
                         "description": "confirm=确认告警，false_positive=标记误报",
                     },
+                    "note": {
+                        "type": "string",
+                        "description": (
+                            "处置结论：怎么处理的、为什么。"
+                            "用户说了原因就原样带上（如「施工人员已登记」），"
+                            "没说就不传。"
+                        ),
+                    },
                 },
                 "required": ["action"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "export_alerts",
+            "description": (
+                "把告警记录导出成 CSV 文件并发给用户。"
+                "用户说「导出」「下载表格」「给我一份 Excel」「导出来」时用这个。"
+                "注意：这是导出【历史记录】，不是查看列表 —— 想查看用 query_history。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "days_back": {
+                        "type": "integer",
+                        "description": "往回导出几天（含今天）。用户说「这个月」就换算成天数",
+                    },
+                    "alert_type": {
+                        "type": "string",
+                        "description": "告警类型，只能是「人员闯入」或「通道占用」。不传=全部",
+                    },
+                    "point_id": {"type": "string", "description": "点位 ID，如 P1 / P2"},
+                    "status": {
+                        "type": "string",
+                        "enum": ["pending", "confirmed", "false_positive"],
+                        "description": "不传=全部状态",
+                    },
+                    "limit": {"type": "integer", "description": "最多导出多少条，默认 2000"},
+                },
             },
         },
     },
@@ -240,6 +270,11 @@ def system_prompt() -> str:
 
 4. **能力边界**：当前只支持两类检测——「人员闯入」（person）与「通道占用」（chair）。
    如果用户问烟火、翻墙、漏水、聚集等，**如实说明本版本不具备该能力**，不要敷衍或编造。
+
+   同样地，**本版本的巡逻任务只支持「立即执行」**，
+   不支持定时（今晚 10 点）和重复（每天）。用户提这类要求时如实说明，
+   **绝不能假装已经设置成功** —— 确认卡上写着 22:00、机器人却立刻出发，
+   这种欺骗比功能缺失严重得多。
 
 5. **指代**：用户说「第 2 条」指的是上一条列表里的第 2 条。
    调用 `handle_alert` 时传 index=2，系统会自己解析成具体告警号。

@@ -20,7 +20,7 @@ from typing import Any
 from agent_service.core import intents
 from agent_service.core.llm import LLMError, client
 from agent_service.core.memory import memory
-from agent_service.report import builder, feishu_card as fc, plain_text
+from agent_service.report import builder, csv_export, feishu_card as fc, plain_text
 from agent_service.report.builder import AlertItem
 from agent_service.tools import patrol as T
 
@@ -33,10 +33,11 @@ MAX_TOOL_ROUNDS = 3
 class Reply:
     """一条要发出的消息。"""
 
-    kind: str                       # card | text | image
+    kind: str                       # card | text | image | file
     card: dict | None = None
     text: str | None = None
     image_path: str | None = None
+    file_path: str | None = None
     caption: str | None = None
     # 卡片消息发出后需要记住其 message_id（用于后续就地更新）
     remember_as_alert_card: str | None = None   # alert_id
@@ -59,6 +60,39 @@ def _alert_replies(
 ) -> list[Reply]:
     memory.remember_alerts(chat_id, [a.alert_id for a in items])
     return [Reply(kind="card", card=fc.list_card(title, condition, items))]
+
+
+def _export_replies(items: list[AlertItem], condition: str) -> list[Reply]:
+    """生成 CSV 并发给用户。
+
+    CSV 用 utf-8-sig 编码（带 BOM），否则 Excel 打开中文全是乱码 ——
+    这是中文 CSV 最常见的投诉，见 report/csv_export.py。
+    """
+    if not items:
+        return [
+            Reply(
+                kind="card",
+                card=fc.result_card(
+                    "📄 没有可导出的记录",
+                    "当前条件下一条记录都没有。\n可以放宽条件，比如「导出最近 7 天全部告警」。",
+                    ok=False,
+                ),
+            )
+        ]
+    try:
+        path = T.build_export(items, condition)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("生成 CSV 失败")
+        return [Reply(kind="card", card=fc.result_card(
+            "⚠️ 导出失败", f"{type(exc).__name__}: {exc}", ok=False))]
+
+    return [
+        Reply(
+            kind="file",
+            file_path=str(path),
+            caption=f"📄 告警导出 · {csv_export.describe(items)}\n文件：{path.name}",
+        )
+    ]
 
 
 def _run_tool(name: str, args: dict, chat_id: str, user_id: str) -> list[Reply]:
@@ -116,8 +150,6 @@ def _run_tool(name: str, args: dict, chat_id: str, user_id: str) -> list[Reply]:
             route_id=args.get("route_id"),
             chat_id=chat_id,
             user_id=user_id,
-            start_at=args.get("start_at"),
-            repeat=args.get("repeat") or "once",
         )
         memory.remember_pending(chat_id, pa_id)
         return [Reply(kind="card", card=fc.confirm_card("任务确认", rows, pa_id))]
@@ -157,16 +189,28 @@ def _run_tool(name: str, args: dict, chat_id: str, user_id: str) -> list[Reply]:
                     "我记不清你指的是哪一条了，请重新查一次列表再处置。",
                     ok=False,
                 ))]
-        res = T.handle_alert(alert_id, args.get("action"), user_id=user_id)
+        res = T.handle_alert(alert_id, args.get("action"), user_id=user_id,
+                             note=args.get("note") or "")
         label = "已确认告警" if res["status"] == "confirmed" else "已标记为误报"
+        body = f"告警 `{res['alert_id']}` 已处置。"
+        if res.get("note"):
+            body += f"\n处置结论：{res['note']}"
         return [Reply(kind="card", card=fc.result_card(
-            f"✅ {res['alert_type']} · {label}",
-            f"告警 `{res['alert_id']}` 已处置。",
-        ))]
+            f"✅ {res['alert_type']} · {label}", body))]
 
     if name == "advance_patrol":
         msg = T.advance_patrol()
         return [Reply(kind="card", card=fc.text_card("⏩ 已加速", msg))]
+
+    if name == "export_alerts":
+        items, cond = T.query_history(
+            days_back=int(args.get("days_back") or 7),
+            alert_type=args.get("alert_type"),
+            point_id=args.get("point_id"),
+            status=args.get("status"),
+            limit=int(args.get("limit") or 2000),
+        )
+        return _export_replies(items, cond)
 
     if name == "show_help":
         return [Reply(kind="card", card=fc.help_card())]
@@ -282,19 +326,13 @@ def handle_card_action(chat_id: str, user_id: str, value: dict) -> ActionResult:
             card = fc.result_card("❌ 已取消", "没有下发任何任务。", ok=False)
             return ActionResult(response_card=card, toast="已取消")
 
-        if act == fc.ACT_TASK_MODIFY:
-            return ActionResult(
-                response_card=fc.text_card(
-                    "✏️ 修改时间",
-                    "请直接发消息告诉我新时间，例如：\n「今晚 10 点巡逻」「明天早上 8 点」",
-                ),
-                toast="请回复新时间",
-            )
-
         if act in (fc.ACT_ALERT_CONFIRM, fc.ACT_ALERT_FALSE):
             alert_id = value["alert_id"]
             action = "confirm" if act == fc.ACT_ALERT_CONFIRM else "false_positive"
-            res = T.handle_alert(alert_id, action, user_id=user_id)
+            # 按钮点击拿不到文字结论，先记一条来源说明；
+            # 用户随后可以补一句（「第2条是误报，门口在施工」）覆盖它
+            default_note = "通过告警卡片按钮处置" if action == "confirm" else "通过告警卡片标记为误报"
+            res = T.handle_alert(alert_id, action, user_id=user_id, note=default_note)
             row = _reload_alert(alert_id)
             if row:
                 card = fc.alert_resolved_card(
@@ -318,9 +356,16 @@ def handle_card_action(chat_id: str, user_id: str, value: dict) -> ActionResult:
                 f"告警号：`{row.alert_id}`\n"
                 f"类型：{row.alert_type}（{row.level}）\n"
                 f"点位：{row.point_name}\n"
-                f"时间：{row.created_at}\n"
-                f"状态：{row.status_label}\n\n"
-                f"**原始模型输出**：`{row.coco_label}` @ {row.confidence:.4f}\n"
+                f"首次出现：{row.created_at}\n"
+                f"处置状态：{row.status_label}\n"
+            )
+            if row.repeated:
+                body += f"持续：{row.duration_label}　出现 {row.occurrence_count} 次\n"
+                body += f"最近一次：{row.last_seen_at or '—'}\n"
+            if row.resolution_note:
+                body += f"处置结论：{row.resolution_note}\n"
+            body += (
+                f"\n**原始模型输出**：`{row.coco_label}` @ {row.confidence:.4f}\n"
                 f"数据来源：{'模拟检测' if row.is_mock else 'YOLO 真实推理'}\n"
                 f"结果图（带检测框）：`{row.image_path or '未留存'}`\n"
                 f"原始帧（未绘制）：`{row.raw_image_path or '未留存'}`"
@@ -352,12 +397,11 @@ def handle_card_action(chat_id: str, user_id: str, value: dict) -> ActionResult:
                                 toast="已加速")
 
         if act == "export":
+            ids = value.get("ids") or []
+            items = T.alerts_by_ids(ids) if ids else []
             return ActionResult(
-                response_card=fc.text_card(
-                    "📄 导出功能不在本版本",
-                    "导出 CSV 计划在下一版提供。当前可以先查看列表或历史查询结果。",
-                ),
-                toast="暂不支持",
+                replies=_export_replies(items, f"列表所选 {len(ids)} 条"),
+                toast="已导出",
             )
 
         if act == fc.ACT_HELP:
@@ -439,6 +483,11 @@ def handle_text_plain(chat_id: str, user_id: str, text: str) -> list[str]:
             out.append(_card_to_text(r.card or {}))
         elif r.kind == "image":
             out.append(r.caption or "[图片]")
+        elif r.kind == "file":
+            out.append(
+                f"{r.caption or '[文件]'}\n"
+                "（当前通道不支持发送文件，CSV 已在服务端生成）"
+            )
     return [t for t in out if t]
 
 

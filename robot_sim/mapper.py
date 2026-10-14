@@ -21,6 +21,7 @@ from shared.scene import AlertType, Point, alert_type
 class AlertDecision:
     detection: Detection
     spec: AlertType
+    count: int = 1          # 本次拍照里命中该目标的个数
 
     @property
     def alert_type(self) -> str:
@@ -59,13 +60,19 @@ def evaluate(point: Point, detections: list[Detection]) -> list[AlertDecision]:
         1. 类别 == 本点位 target_label
         2. 置信度 >= 本点位 conf_threshold
         3. 若点位配了 zone，则检测框中心必须落在区域内（用于「越界闯入」）
+
+    关于「命中多个」：
+        这里只产出**一条**告警（避免一次巡逻刷出 N 张卡片把 IM 淹没），
+        但会把命中个数记在 `count` 上 —— 画面里 3 个人闯入，
+        卡片要显示「检测到 3 人」，而不是只提 1 个。
+        早期版本直接 `out[:1]` 丢掉其余，对安防来说是**漏报**。
     """
     spec = alert_type(point.target_label)
     if spec is None:
         # 点位配了未定义映射的类别——配置错误，静默不告警但要有迹可循
         return []
 
-    out: list[AlertDecision] = []
+    matched: list[Detection] = []
     for det in detections:
         if det.label != point.target_label:
             continue
@@ -73,12 +80,13 @@ def evaluate(point: Point, detections: list[Detection]) -> list[AlertDecision]:
             continue
         if point.zone and not point_in_zone(det.center, point.zone):
             continue
-        out.append(AlertDecision(detection=det, spec=spec))
+        matched.append(det)
 
-    # 同一次拍照同类目标可能检出多个：只保留置信度最高的一个作为告警，
-    # 避免「一次巡逻刷出 5 条人员闯入」把 IM 淹没。
-    out.sort(key=lambda d: d.detection.confidence, reverse=True)
-    return out[:1]
+    if not matched:
+        return []
+
+    matched.sort(key=lambda d: d.confidence, reverse=True)
+    return [AlertDecision(detection=matched[0], spec=spec, count=len(matched))]
 
 
 def explain(point: Point, detections: list[Detection]) -> str:

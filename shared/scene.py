@@ -80,6 +80,14 @@ class DetectorProfile:
     allow_mock_fallback: bool = True
 
 
+@dataclass(frozen=True)
+class AlertPolicy:
+    """告警抑制策略（config/mapping.yaml alert_policy）。"""
+
+    suppress_minutes: int = 30
+    update_card_on_suppress: bool = True
+
+
 # ------------------------------------------------------------------ 载入
 
 
@@ -126,6 +134,14 @@ def detector() -> DetectorProfile:
         conf_floor=float(d.get("conf_floor", 0.35)),
         model=d.get("model", "yolov8n.pt"),
         allow_mock_fallback=bool(d.get("allow_mock_fallback", True)),
+    )
+
+
+def alert_policy() -> AlertPolicy:
+    a = _mapping_doc().get("alert_policy") or {}
+    return AlertPolicy(
+        suppress_minutes=int(a.get("suppress_minutes", 30)),
+        update_card_on_suppress=bool(a.get("update_card_on_suppress", True)),
     )
 
 

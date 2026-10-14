@@ -33,3 +33,16 @@ detector:
   conf_floor: 0.35          # 低于此置信度的检测结果直接丢弃，不入库
   model: "yolov8n.pt"
   allow_mock_fallback: true # 未安装 ultralytics 时降级为模拟检测并标注 is_mock
+
+# 告警抑制策略
+#
+# 为什么必须有这一层：
+#   没有它，同一个人一直站在摄像头前，每次巡逻都会新建一条「人员闯入」——
+#   实测 10 条真实告警里 9 条是同一个人在同一个点位的重复报警，
+#   值班员会被淹没，真正的新告警反而看不见。
+#
+# 规则：同一 (点位, 告警类型) 在 suppress_minutes 内已有「待处置」告警时，
+#       不新建，而是累加出现次数 + 更新最后出现时间，并就地刷新原卡片。
+alert_policy:
+  suppress_minutes: 30
+  update_card_on_suppress: true

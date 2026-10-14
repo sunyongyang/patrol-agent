@@ -42,8 +42,15 @@ STATE: dict[str, object] = {}
 # ==================================================================== 推送
 
 
-def push_alert(alert_id: str) -> dict:
-    """把一条告警推给所有已知联系人（带抓拍原图）。"""
+def push_alert(
+    alert_id: str, suppressed: bool = False, card_message_id: str = ""
+) -> dict:
+    """把一条告警推给所有已知联系人（带算法结果图）。
+
+    抑制中的告警走「就地刷新原卡片」：同一个目标还在画面里，
+    再发一条卡片只会让值班员以为来了新的。改为刷新原卡片，
+    并显示「已持续 X · 出现 N 次」。
+    """
     adapter: FeishuAdapter = STATE["adapter"]  # type: ignore[assignment]
     row = orchestrator._reload_alert(alert_id)  # noqa: SLF001
     if not row:
@@ -52,9 +59,27 @@ def push_alert(alert_id: str) -> dict:
 
     img_key = adapter.upload_image(row.image_path) if row.image_path else None
     card = fc.alert_card(row, img_key=img_key)
+
+    target = card_message_id or row.card_message_id or ""
+    if suppressed and target and adapter.capabilities().card_update:
+        if adapter.update_card(target, card):
+            log.info(
+                "抑制告警 %s：就地刷新卡片（第 %d 次，已持续 %s）",
+                alert_id, row.occurrence_count, row.duration_label,
+            )
+            return {
+                "updated": 1,
+                "alert_id": alert_id,
+                "message_id": target,
+                "occurrence_count": row.occurrence_count,
+            }
+        log.warning("就地刷新卡片失败，退回发新卡片")
+
     sent = adapter.broadcast_card(card)
     if sent:
-        repo.mark_alert_pushed(alert_id, "")
+        # 记住 message_id，后续这条告警被抑制时才能找到卡片来刷新
+        first_mid = next(iter(sent.values()), "")
+        repo.mark_alert_pushed(alert_id, first_mid)
     return {"sent": len(sent), "alert_id": alert_id, "img_key": bool(img_key)}
 
 
@@ -125,6 +150,12 @@ class AlertPush(BaseModel):
     run_id: str | None = None
     image_path: str | None = None
     detected_at: str | None = None
+    # 告警抑制：同一个目标还在画面里时，刷新原卡片而不是发新卡片
+    suppressed: bool = False
+    occurrence_count: int = 1
+    target_count: int = 1
+    first_seen_at: str | None = None
+    card_message_id: str = ""
 
 
 class RunFinished(BaseModel):
@@ -157,9 +188,16 @@ def health() -> dict:
 @app.post("/internal/alert")
 def internal_alert(body: AlertPush) -> dict:
     """机器人模拟器检测到告警时的回调。"""
-    log.info("收到告警回调 %s %s", body.alert_id, body.alert_type)
+    log.info(
+        "收到告警回调 %s %s（suppressed=%s, 第 %d 次）",
+        body.alert_id, body.alert_type, body.suppressed, body.occurrence_count,
+    )
     try:
-        return push_alert(body.alert_id)
+        return push_alert(
+            body.alert_id,
+            suppressed=body.suppressed,
+            card_message_id=body.card_message_id,
+        )
     except Exception as exc:  # noqa: BLE001
         log.exception("告警推送失败")
         return {"sent": 0, "error": str(exc)}

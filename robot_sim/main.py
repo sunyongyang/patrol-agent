@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
@@ -144,14 +145,28 @@ def robot_status(robot_id: str) -> dict:
 @app.post("/robot/{robot_id}/tasks", status_code=201)
 def create_task(robot_id: str, body: TaskCreate) -> dict:
     robot = _robot()
+
+    # 定时任务尚未实现：没有调度器读取 task.start_at。
+    # 与其静默忽略（用户以为设了 22:00，实际立刻出发），不如明确拒绝。
+    if body.start_at:
+        try:
+            start = datetime.fromisoformat(body.start_at)
+        except ValueError as exc:
+            raise HTTPException(400, f"start_at 格式不正确，应为 ISO8601：{body.start_at}") from exc
+        if start > datetime.now() + timedelta(seconds=5):
+            raise HTTPException(
+                501,
+                "定时巡逻尚未实现。本版本只支持立即执行，请留空 start_at。",
+            )
+
     try:
         task = repo.create_task(
             robot_id=robot_id,
             route_id=body.route_id,
             created_by=body.created_by,
             source_channel=body.source_channel,
-            start_at=body.start_at,
-            repeat_cron=body.repeat,
+            start_at=None,
+            repeat_cron=None,
         )
     except KeyError as exc:
         raise HTTPException(400, str(exc)) from exc

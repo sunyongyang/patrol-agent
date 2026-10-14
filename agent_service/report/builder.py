@@ -30,6 +30,36 @@ class AlertItem:
     created_at: str
     is_mock: bool
     raw_image_path: str | None = None
+    # 告警抑制相关：同一目标持续存在时累加，而不是新建
+    occurrence_count: int = 1
+    # 本次拍照里命中该目标的个数（3 个人闯入 → 3）
+    target_count: int = 1
+    last_seen_at: str | None = None
+    resolution_note: str | None = None
+    card_message_id: str = ""
+
+    @property
+    def duration_minutes(self) -> int:
+        """从首次出现到现在持续了多少分钟。"""
+        try:
+            start = datetime.fromisoformat(self.created_at)
+            end = datetime.fromisoformat(self.last_seen_at) if self.last_seen_at else datetime.now()
+            return max(0, int((end - start).total_seconds() // 60))
+        except (ValueError, TypeError):
+            return 0
+
+    @property
+    def duration_label(self) -> str:
+        mins = self.duration_minutes
+        if mins < 1:
+            return "不足 1 分钟"
+        if mins < 60:
+            return f"{mins} 分钟"
+        return f"{mins // 60} 小时 {mins % 60} 分钟"
+
+    @property
+    def repeated(self) -> bool:
+        return self.occurrence_count > 1
 
     @property
     def emoji(self) -> str:
@@ -42,6 +72,8 @@ class AlertItem:
             "pending": "待处置",
             "confirmed": "已确认",
             "false_positive": "误报",
+            # 历史重复告警被合并后保留的存档记录，不计入报表总数
+            "merged": "已合并",
         }.get(self.status, self.status)
 
     @property
@@ -79,10 +111,10 @@ class DailyReport:
 
     @property
     def coverage_note(self) -> str:
-        """口径说明。Demo 用简化口径，必须标注，否则数字会被质疑。"""
+        """口径说明。数字要站得住，名字必须叫准。"""
         return (
-            "口径：覆盖率 = 已完成点位数 / 应巡点位数（简化口径）。"
-            "正式定义见《巡逻覆盖率和路径完成率》。"
+            "口径：路径完成率 = 已完成点位 / 应巡点位。"
+            "这**不是**「巡逻覆盖率」——后者按 KPI 定义还含时间维度，本版本未实现。"
         )
 
 
@@ -107,6 +139,11 @@ def _to_alert_item(row: dict) -> AlertItem:
         created_at=row.get("created_at", ""),
         is_mock=bool(row.get("is_mock")),
         raw_image_path=row.get("raw_image_path"),
+        occurrence_count=int(row.get("occurrence_count") or 1),
+        target_count=int(row.get("target_count") or 1),
+        last_seen_at=row.get("last_seen_at"),
+        resolution_note=row.get("resolution_note"),
+        card_message_id=row.get("card_message_id") or "",
     )
 
 
@@ -145,13 +182,15 @@ def query_history(
     days_back: int,
     alert_type: str | None = None,
     point_id: str | None = None,
+    status: str | None = None,
     limit: int = 5,
     end_day: str | None = None,
 ) -> tuple[list[AlertItem], str]:
     """返回 (告警列表, 条件描述)。"""
     since, until = repo.range_bounds(days_back, end_day)
     rows = repo.list_alerts(
-        since=since, until=until, alert_type=alert_type, point_id=point_id, limit=limit
+        since=since, until=until, alert_type=alert_type, point_id=point_id,
+        status=status, limit=limit,
     )
     conds = [f"{since[:10]} ~ {until[:10]}"]
     if alert_type:
@@ -159,7 +198,14 @@ def query_history(
     if point_id:
         pts = all_points()
         conds.append(f"点位={pts[point_id].name if point_id in pts else point_id}")
+    if status:
+        conds.append({"pending": "待处置", "confirmed": "已确认",
+                      "false_positive": "误报"}.get(status, status))
     return [_to_alert_item(r) for r in rows], "｜".join(conds)
+
+
+def alerts_by_ids(ids: list[str]) -> list[AlertItem]:
+    return [_to_alert_item(r) for r in repo.list_alerts_by_ids(ids)]
 
 
 def count_alerts(

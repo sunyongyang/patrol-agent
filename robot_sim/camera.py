@@ -130,8 +130,15 @@ class Camera:
             raise CameraError("JPEG 编码失败")
         return buf.tobytes()
 
-    def probe(self) -> dict:
-        """自检：能否打开、分辨率、抓一帧耗时。"""
+    def probe(self, close: bool = False) -> dict:
+        """自检：能否打开、分辨率、抓一帧耗时。
+
+        ⚠️ close 默认 **False**。
+        这里曾经无条件 `finally: self.close()`，而 /health 会调 probe ——
+        结果**任何一次健康检查都会把常驻的摄像头关掉**，
+        下一次抓帧要重新打开（本机实测 6 秒），巡逻中途被这么打断一次就很难看。
+        只有确实要释放设备的场景（如独立自检脚本收尾）才传 close=True。
+        """
         info: dict = {"index": self.profile.index}
         started = time.monotonic()
         try:
@@ -147,5 +154,10 @@ class Camera:
         except Exception as exc:  # noqa: BLE001
             info.update(ok=False, error=f"{type(exc).__name__}: {exc}")
         finally:
-            self.close()
+            if close:
+                self.close()
         return info
+
+    def opened(self) -> bool:
+        with self._lock:
+            return self._cap is not None and self._cap.isOpened()

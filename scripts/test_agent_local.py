@@ -40,6 +40,23 @@ def show(replies: list[orchestrator.Reply]) -> None:
             print(f"      文本: {r.text}")
         elif r.kind == "image":
             print(f"      图片: {r.image_path}")
+        elif r.kind == "file":
+            print(f"      文件: {r.file_path}")
+            if r.caption:
+                print(f"      说明: {r.caption.replace(chr(10), ' / ')}")
+            # 把 CSV 前几行打出来，确认编码与列名
+            try:
+                with open(r.file_path, encoding="utf-8-sig", newline="") as fh:
+                    head = fh.read().splitlines()[:3]
+                print("      CSV 前 3 行:")
+                for line in head:
+                    print(f"        {line[:120]}")
+                raw = Path(r.file_path).read_bytes()[:3]
+                has_bom = raw == bytes([0xEF, 0xBB, 0xBF])
+                verdict = "utf-8-sig 正确" if has_bom else "缺少 BOM，Excel 打开会乱码!"
+                print(f"      文件头 3 字节: {raw.hex(' ')}  -> {verdict}")
+            except Exception as exc:  # noqa: BLE001
+                print(f"      [FAIL] 读取 CSV 失败: {exc}")
 
 
 def main() -> int:

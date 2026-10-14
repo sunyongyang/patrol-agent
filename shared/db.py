@@ -93,6 +93,8 @@ CREATE TABLE IF NOT EXISTS detection (
 );
 
 -- 映射后的业务语义；一条 detection 可产生 0 或 1 条 alert
+-- occurrence_count / last_seen_at 用于告警抑制：
+--   同一目标持续存在时累加次数而不是新建告警（见 config/mapping.yaml alert_policy）
 CREATE TABLE IF NOT EXISTS alert (
     id              TEXT PRIMARY KEY,
     detection_id    TEXT NOT NULL,
@@ -102,8 +104,12 @@ CREATE TABLE IF NOT EXISTS alert (
     status          TEXT NOT NULL DEFAULT 'pending',
     handled_by      TEXT,
     handled_at      TEXT,
+    resolution_note TEXT,
     pushed_at       TEXT,
     card_message_id TEXT,
+    occurrence_count INTEGER NOT NULL DEFAULT 1,
+    target_count    INTEGER NOT NULL DEFAULT 1,
+    last_seen_at    TEXT,
     created_at      TEXT NOT NULL
 );
 
@@ -168,6 +174,19 @@ def _migrate(conn: sqlite3.Connection) -> None:
         if column not in existing:
             conn.execute(ddl)
             print(f"[migrate] detection 表补列 {column}")
+
+    alert_cols = {row["name"] for row in conn.execute("PRAGMA table_info(alert)")}
+    for column, ddl in (
+        ("resolution_note", "ALTER TABLE alert ADD COLUMN resolution_note TEXT"),
+        ("occurrence_count",
+         "ALTER TABLE alert ADD COLUMN occurrence_count INTEGER NOT NULL DEFAULT 1"),
+        ("target_count",
+         "ALTER TABLE alert ADD COLUMN target_count INTEGER NOT NULL DEFAULT 1"),
+        ("last_seen_at", "ALTER TABLE alert ADD COLUMN last_seen_at TEXT"),
+    ):
+        if column not in alert_cols:
+            conn.execute(ddl)
+            print(f"[migrate] alert 表补列 {column}")
 
 
 # ------------------------------------------------------------------ ID 生成

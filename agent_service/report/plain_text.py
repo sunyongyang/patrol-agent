@@ -18,22 +18,30 @@ def render_daily(r: DailyReport) -> str:
     lines = [
         f"📊 巡逻日报 · {r.label}",
         SEP,
-        f"✅ 任务完成 {st.get('runs_completed', 0)}/{st.get('runs_total', 0)}　"
-        f"覆盖率 {st.get('coverage_rate', 0)}%",
+        f"✅ 任务完成 {st.get('runs_completed', 0)}/{st.get('runs_total', 0)}",
+        f"🛣 路径完成率 {st.get('path_completion_rate', 0)}%"
+        f"（{st.get('points_done', 0)}/{st.get('points_total', 0)} 个点位）",
+        f"📷 拍照 {st.get('captures', 0)} 次　检出目标 {st.get('detections', 0)} 个",
         f"⚠️ 告警 {ac.get('total', 0)} 条　待处置 {ac.get('pending', 0)} 条",
-        f"🔍 检测记录 {st.get('detections', 0)} 条",
         SEP,
     ]
     if r.top_alerts:
         lines.append("重点异常：")
         for i, a in enumerate(r.top_alerts, start=1):
             mark = " ⚠️" if a.status == "pending" else ""
-            lines.append(f"{i}. {a.emoji} {a.alert_type}·{a.point_name}·{a.time_hm} [{a.status_label}]{mark}")
+            extra = f"（持续{a.duration_label}·{a.occurrence_count}次）" if a.repeated else ""
+            lines.append(
+                f"{i}. {a.emoji} {a.alert_type}·{a.point_name}·{a.time_hm} "
+                f"[{a.status_label}]{extra}{mark}"
+            )
     else:
         lines.append("重点异常：无")
 
     if r.has_mock:
-        lines.append("⚠️ 含模拟检测数据，非真实推理结果。")
+        lines.append(
+            f"⚠️ 含模拟检测数据：{st.get('mock_detections', 0)}/"
+            f"{st.get('detections', 0)} 条为模拟，非真实推理结果。"
+        )
     lines.append("")
     lines.append("回复 1 看待处置告警｜2 看最近 7 天")
     return "\n".join(lines)

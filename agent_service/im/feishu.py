@@ -172,6 +172,51 @@ class FeishuAdapter:
             return None
         return resp.json()["data"]["message_id"]
 
+    def upload_file(self, path: str, file_type: str = "stream") -> str | None:
+        """上传文件，返回 file_key。CSV/Excel 用 file_type=stream。"""
+        p = Path(path)
+        if not p.exists():
+            log.warning("文件不存在，跳过上传: %s", path)
+            return None
+        mime = {
+            ".csv": "text/csv",
+            ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            ".pdf": "application/pdf",
+            ".txt": "text/plain",
+        }.get(p.suffix.lower(), "application/octet-stream")
+        with p.open("rb") as fh:
+            resp = requests.post(
+                f"{self.base}/im/v1/files",
+                headers=self._headers(),
+                data={"file_type": file_type, "file_name": p.name},
+                files={"file": (p.name, fh, mime)},
+                timeout=60,
+            )
+        if resp.status_code != 200 or resp.json().get("code") != 0:
+            log.error("上传文件失败: %s", self._err(resp))
+            return None
+        return resp.json()["data"]["file_key"]
+
+    def send_file(self, chat_id: str, path: str, file_type: str = "stream") -> str | None:
+        key = self.upload_file(path, file_type)
+        if not key:
+            return None
+        resp = requests.post(
+            f"{self.base}/im/v1/messages",
+            headers=self._headers(),
+            params={"receive_id_type": "chat_id"},
+            json={
+                "receive_id": chat_id,
+                "msg_type": "file",
+                "content": json.dumps({"file_key": key}),
+            },
+            timeout=30,
+        )
+        if resp.status_code != 200 or resp.json().get("code") != 0:
+            log.error("发送文件失败: %s", self._err(resp))
+            return None
+        return resp.json()["data"]["message_id"]
+
     def reply_text(self, message_id: str, text: str) -> str | None:
         """回复某条消息（引用形式）。"""
         resp = requests.post(
@@ -196,17 +241,21 @@ class FeishuAdapter:
         except ValueError:
             return {}
 
-    def broadcast_card(self, card: dict) -> list[str]:
-        """向所有已知联系人推送卡片（告警、日报用）。"""
-        sent: list[str] = []
+    def broadcast_card(self, card: dict) -> dict[str, str]:
+        """向所有已知联系人推送卡片，返回 {chat_id: message_id}。
+
+        返回 message_id 是必要的：告警被抑制时要把**原卡片**就地刷新，
+        没有 message_id 就只能再发一条新消息，抑制就白做了。
+        """
+        sent: dict[str, str] = {}
         for open_id, info in self.known_contacts().items():
             chat_id = info.get("chat_id")
             if not chat_id:
                 continue
             mid = self.send_card(chat_id, card)
             if mid:
-                sent.append(chat_id)
-                log.info("已推送给 %s（chat_id=%s）", open_id, chat_id)
+                sent[chat_id] = mid
+                log.info("已推送给 %s（chat_id=%s, message_id=%s）", open_id, chat_id, mid)
         if not sent:
             log.warning("没有已知联系人可推送 —— 请先用飞书给机器人发一条消息")
         return sent
@@ -226,6 +275,12 @@ class FeishuAdapter:
                 self.send_image(chat_id, r.image_path)
                 if r.caption:
                     self.send_text(chat_id, r.caption)
+            elif r.kind == "file" and r.file_path:
+                mid = self.send_file(chat_id, r.file_path)
+                if r.caption:
+                    self.send_text(chat_id, r.caption)
+                if not mid:
+                    self.send_text(chat_id, "⚠️ 文件发送失败，可稍后重试或先看列表结果。")
 
     # ------------------------------------------------------------ 事件处理
 
