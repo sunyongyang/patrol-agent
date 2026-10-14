@@ -79,6 +79,22 @@ CREATE TABLE IF NOT EXISTS patrol_run (
     points_done  INTEGER NOT NULL DEFAULT 0
 );
 
+CREATE TABLE IF NOT EXISTS patrol_capture (
+    id              TEXT PRIMARY KEY,
+    run_id          TEXT NOT NULL,
+    point_id        TEXT NOT NULL,
+    algorithm_id    TEXT NOT NULL,
+    algorithm_name  TEXT NOT NULL,
+    result_status   TEXT NOT NULL,
+    detections_json TEXT NOT NULL DEFAULT '[]',
+    alert_id        TEXT,
+    image_path      TEXT,
+    raw_image_path  TEXT,
+    infer_ms        INTEGER NOT NULL DEFAULT 0,
+    is_mock         INTEGER NOT NULL DEFAULT 0,
+    created_at      TEXT NOT NULL
+);
+
 -- 原始模型输出：全类别，保留证据（Spec §8 可追溯性要求）
 -- image_path 指向「标注帧」（带检测框，推送给用户的那张）
 -- raw_image_path 指向「原始帧」（未绘制，证据本体）
@@ -139,10 +155,17 @@ CREATE TABLE IF NOT EXISTS pending_action (
 
 CREATE INDEX IF NOT EXISTS idx_detection_run   ON detection(run_id);
 CREATE INDEX IF NOT EXISTS idx_detection_time  ON detection(created_at);
+CREATE INDEX IF NOT EXISTS idx_capture_run     ON patrol_capture(run_id, point_id);
 CREATE INDEX IF NOT EXISTS idx_alert_status    ON alert(status);
 CREATE INDEX IF NOT EXISTS idx_alert_time      ON alert(created_at);
 CREATE INDEX IF NOT EXISTS idx_run_time        ON patrol_run(started_at);
 CREATE INDEX IF NOT EXISTS idx_pending_chat    ON pending_action(chat_id, status);
+
+-- 流水号计数器：按 (前缀, 日期) 维护，见 next_id()
+CREATE TABLE IF NOT EXISTS id_seq (
+    scope TEXT PRIMARY KEY,
+    value INTEGER NOT NULL DEFAULT 0
+);
 """
 
 
@@ -200,23 +223,67 @@ def _migrate(conn: sqlite3.Connection) -> None:
 # ------------------------------------------------------------------ ID 生成
 
 
-def next_id(conn: sqlite3.Connection, table: str, prefix: str) -> str:
-    """生成可读的当日流水号，如 T-20261013-004。
+def next_id(
+    conn: sqlite3.Connection,
+    table: str,
+    prefix: str,
+    day: str | None = None,
+    width: int = 3,
+) -> str:
+    """生成指定日期的流水号，如 T-20261014-004。
 
-    演示用，够直观即可；并发冲突风险由 UNIQUE 主键兜底。
+    ⚠️ 这里踩过一次线上级的坑：原实现用 `COUNT(*)+1` 生成编号。
+    seed 脚本是直接写 ID 的（用全局计数器），与 COUNT 派生出的编号规则不一致 ——
+    一旦当日任务号有跳号，`COUNT+1` 就会撞上已存在的 ID，
+    表现为用户在飞书点「确认下发」收到 500：
+        sqlite3.IntegrityError: UNIQUE constraint failed: task.id
+
+    现在的做法：
+        · 用 id_seq 表按 (前缀, 日期) 维护计数器
+        · 首次使用时用**现有最大序号**初始化，兼容 seed 等直接写入的 ID
+        · `UPDATE ... RETURNING` 原子自增，自增与读取一步完成
+        · 落库前**再校验一次是否存在**，存在就继续往下要号 ——
+          即使有人直接 INSERT 了 ID（如 seed 脚本），也不会撞车
     """
-    day = datetime.now().strftime("%Y%m%d")
-    like = f"{prefix}-{day}-%"
-    row = conn.execute(
-        f"SELECT COUNT(*) AS n FROM {table} WHERE id LIKE ?", (like,)
-    ).fetchone()
-    seq = (row["n"] if row else 0) + 1
-    return f"{prefix}-{day}-{seq:03d}"
+    day = day or datetime.now().strftime("%Y%m%d")
+    scope = f"{prefix}-{day}"
+
+    row = conn.execute("SELECT value FROM id_seq WHERE scope=?", (scope,)).fetchone()
+    if row is None:
+        existing = conn.execute(
+            f"SELECT id FROM {table} WHERE id LIKE ?", (f"{scope}-%",)
+        ).fetchall()
+        highest = 0
+        for r in existing:
+            tail = str(r["id"]).rsplit("-", 1)[-1]
+            if tail.isdigit():
+                highest = max(highest, int(tail))
+        conn.execute(
+            "INSERT INTO id_seq (scope, value) VALUES (?, ?) ON CONFLICT(scope) DO NOTHING",
+            (scope, highest),
+        )
+
+    for _ in range(200):
+        n = conn.execute(
+            "UPDATE id_seq SET value = value + 1 WHERE scope = ? RETURNING value",
+            (scope,),
+        ).fetchone()["value"]
+        candidate = f"{scope}-{n:0{width}d}"
+        taken = conn.execute(
+            f"SELECT 1 FROM {table} WHERE id = ?", (candidate,)
+        ).fetchone()
+        if taken is None:
+            return candidate
+
+    raise RuntimeError(f"无法为 {table} 生成唯一编号（scope={scope}）")
 
 
 def table_counts() -> dict[str, int]:
     """自检用：看各表有多少行。"""
-    tables = ["robot", "point", "route", "task", "patrol_run", "detection", "alert", "message"]
+    tables = [
+        "robot", "point", "route", "task", "patrol_run", "patrol_capture",
+        "detection", "alert", "message",
+    ]
     out: dict[str, int] = {}
     with connect() as conn:
         for t in tables:

@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """数据访问层：SQL 集中在这里，robot_sim 与 agent_service 共用。
 
-设计取舍：不做 ORM。表只有 9 张、字段稳定，手写 SQL 更好读、更好查问题，
+设计取舍：不做 ORM。表结构简单稳定，手写 SQL 更好读、更好查问题，
 也不会为了一个 Demo 引入 SQLAlchemy 的迁移负担。
 """
 
@@ -195,6 +195,84 @@ def run_for_task(task_id: str) -> dict | None:
             (task_id,),
         ).fetchone()
         return dict(row) if row else None
+
+
+def list_patrol_runs(since: str, until: str) -> list[dict]:
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT pr.*, t.route_id, t.created_by, r.name AS route_name
+            FROM patrol_run pr
+            LEFT JOIN task t ON t.id = pr.task_id
+            LEFT JOIN route r ON r.id = t.route_id
+            WHERE pr.started_at >= ? AND pr.started_at <= ?
+            ORDER BY pr.started_at, pr.id
+            """,
+            (since, until),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
+def list_patrol_captures(run_id: str) -> list[dict]:
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM patrol_capture WHERE run_id=? ORDER BY created_at, point_id",
+            (run_id,),
+        ).fetchall()
+        captures = [dict(row) for row in rows]
+    for capture in captures:
+        try:
+            capture["detections"] = json.loads(capture.pop("detections_json") or "[]")
+        except ValueError:
+            capture["detections"] = []
+    return captures
+
+
+def list_run_evidence(run_id: str) -> list[dict]:
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT d.*, a.id AS alert_id, a.alert_type, a.level, a.status AS alert_status,
+                   a.target_count, a.occurrence_count
+            FROM detection d
+            LEFT JOIN alert a ON a.detection_id = d.id
+            WHERE d.run_id=?
+            ORDER BY d.created_at, d.id
+            """,
+            (run_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
+def insert_patrol_capture(
+    *,
+    run_id: str,
+    point_id: str,
+    algorithm_id: str,
+    algorithm_name: str,
+    result_status: str,
+    detections: list[dict],
+    alert_id: str | None,
+    image_path: str,
+    raw_image_path: str,
+    infer_ms: int,
+    is_mock: bool,
+) -> None:
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO patrol_capture (
+                id, run_id, point_id, algorithm_id, algorithm_name, result_status,
+                detections_json, alert_id, image_path, raw_image_path, infer_ms,
+                is_mock, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                f"{run_id}:{point_id}", run_id, point_id, algorithm_id, algorithm_name,
+                result_status, json.dumps(detections, ensure_ascii=False), alert_id,
+                image_path, raw_image_path, int(infer_ms), int(is_mock), now_iso(),
+            ),
+        )
 
 
 def latest_run(limit: int = 1) -> list[dict]:

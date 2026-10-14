@@ -44,19 +44,23 @@ def show(replies: list[orchestrator.Reply]) -> None:
             print(f"      文件: {r.file_path}")
             if r.caption:
                 print(f"      说明: {r.caption.replace(chr(10), ' / ')}")
-            # 把 CSV 前几行打出来，确认编码与列名
             try:
-                with open(r.file_path, encoding="utf-8-sig", newline="") as fh:
-                    head = fh.read().splitlines()[:3]
-                print("      CSV 前 3 行:")
-                for line in head:
-                    print(f"        {line[:120]}")
-                raw = Path(r.file_path).read_bytes()[:3]
-                has_bom = raw == bytes([0xEF, 0xBB, 0xBF])
-                verdict = "utf-8-sig 正确" if has_bom else "缺少 BOM，Excel 打开会乱码!"
-                print(f"      文件头 3 字节: {raw.hex(' ')}  -> {verdict}")
+                path = Path(r.file_path)
+                raw = path.read_bytes()
+                if path.suffix.lower() == ".pdf":
+                    valid = raw.startswith(b"%PDF-")
+                    print(f"      PDF 签名: {'正确' if valid else '无效'}；大小 {len(raw) / 1024:.1f} KB")
+                else:
+                    with open(path, encoding="utf-8-sig", newline="") as fh:
+                        head = fh.read().splitlines()[:3]
+                    print("      CSV 前 3 行:")
+                    for line in head:
+                        print(f"        {line[:120]}")
+                    has_bom = raw[:3] == bytes([0xEF, 0xBB, 0xBF])
+                    verdict = "utf-8-sig 正确" if has_bom else "缺少 BOM，Excel 打开会乱码!"
+                    print(f"      文件头 3 字节: {raw[:3].hex(' ')}  -> {verdict}")
             except Exception as exc:  # noqa: BLE001
-                print(f"      [FAIL] 读取 CSV 失败: {exc}")
+                print(f"      [FAIL] 检查导出文件失败: {exc}")
 
 
 def main() -> int:

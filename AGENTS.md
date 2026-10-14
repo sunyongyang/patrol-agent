@@ -63,7 +63,44 @@ agent_service :8200  飞书长连接 + LLM 编排 + 报表 + 定时推送
 
 - **配置文件**：`config/config.yaml`（含密钥，已在 .gitignore）。模板见 `config/config.example.yaml`
 - **端口被占**：先确认占用进程确实是本项目的 uvicorn 再处理；历史上出现过「pwsh 包装器退出了但 python 子进程还活着」
-- **GitHub 推送**：本机 schannel 对 github.com 频繁 SSL 握手失败，仓库已设 `http.sslBackend=openssl`
+- **摄像头独占**：`robot_sim` 启动时就 `camera.open()`，**持有到进程退出**。
+  Windows 相机默认独占访问，所以它跑着的时候飞书/钉钉开会拿不到画面（已实测）。
+  别在用户要开会时留着服务跑。
+
+### 推送代码（这条最容易卡住）
+
+**本机到 github.com 的 TLS 连接失败率约 1/3**（实测 6 次里失败 2 次），
+报错形如 `TLS connect error: error:0A000126:SSL routines::unexpected eof while reading`。
+**这不是认证问题，是网络抖动，重试就能成。**
+
+所以**不要直接 `git push`**，用仓库自带的带重试脚本：
+
+```powershell
+.\scripts\git_push.ps1                  # 推当前分支，自动重试 8 次
+.\scripts\git_push.ps1 -MaxAttempts 15
+```
+
+它会先检查 TLS 后端、代理是否可达、有无待推送内容，再带退避重试。
+失败时打印**完整**错误，不要只看最后一行。
+
+几个坑：
+
+| 现象 | 真相 |
+|---|---|
+| `unexpected eof while reading` | 纯网络抖动，重试 |
+| **`Repository not found` / `correct access rights`** | 本机配了代理（`http.proxy=127.0.0.1:10809`），代理抖动时会返回像 404 的响应，**常常不是权限问题**。先 `gh auth status` 自查，再重试 |
+| `schannel` 相关失败 | 系统级是 schannel，本仓库已设 `http.sslBackend=openssl`（openssl 明显更稳）。若换到别的仓库遇到同样问题，就 `git config http.sslBackend openssl` |
+
+凭据由 **gh CLI** 提供，且已写入**全局** git config，所以 VSCode、其它模型、其它工具都能直接用，不需要各自登录：
+
+```
+credential.https://github.com.helper = !'C:\Program Files\GitHub CLI\gh.exe' auth git-credential
+```
+
+若某天失效：`gh auth login` 重新登录一次即可。
+
+> 仓库里还有 `http.sslBackend=openssl` 这一条是**仓库本地**配置（`.git/config`）。
+> 在别处 clone 这个仓库时不会带过去，需要时手工设一次。
 
 ---
 

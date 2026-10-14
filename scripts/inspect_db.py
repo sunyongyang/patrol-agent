@@ -50,9 +50,11 @@ def main() -> int:
     n, size = dir_stats(IMAGE_DIR, "*.jpg")
     print(f"\n抓拍图   {IMAGE_DIR}")
     print(f"         {n} 张，{human(size)}")
-    n, size = dir_stats(EXPORT_DIR, "*.csv")
+    csv_n, csv_size = dir_stats(EXPORT_DIR, "*.csv")
+    pdf_n, pdf_size = dir_stats(EXPORT_DIR, "*.pdf")
     print(f"\n导出     {EXPORT_DIR}")
-    print(f"         {n} 个 CSV，{human(size)}")
+    print(f"         {pdf_n} 个 PDF，{human(pdf_size)}")
+    print(f"         {csv_n} 个 CSV，{human(csv_size)}")
 
     with connect() as conn:
         print("\n" + "-" * 68)

@@ -199,8 +199,8 @@ TOOLS: list[dict] = [
             "name": "export_alerts",
             "description": (
                 "把告警记录导出成 CSV 文件并发给用户。"
-                "用户说「导出」「下载表格」「给我一份 Excel」「导出来」时用这个。"
-                "注意：这是导出【历史记录】，不是查看列表 —— 想查看用 query_history。"
+                "仅当用户明确要求 CSV、Excel 或告警明细表格时使用。"
+                "这是告警历史，不包含无异常点位的巡逻结果。"
             ),
             "parameters": {
                 "type": "object",
@@ -220,6 +220,26 @@ TOOLS: list[dict] = [
                         "description": "不传=全部状态",
                     },
                     "limit": {"type": "integer", "description": "最多导出多少条，默认 2000"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "export_patrol_report",
+            "description": (
+                "导出指定日期的完整巡逻结果 PDF，包含当天所有巡逻轮次、每个路线点位的算法判断和图像证据。"
+                "异常点位使用带检测框的算法结果图，正常点位使用原始拍照图。"
+                "用户说巡逻报告、巡逻报表、导出 PDF、查看每个点位结果或图片时使用；日期不明默认今天。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "date": {
+                        "type": "string",
+                        "description": "报告日期 YYYY-MM-DD。不传=今天",
+                    }
                 },
             },
         },
@@ -290,6 +310,9 @@ def system_prompt() -> str:
    报表、列表、任务确认、能力清单、详情都必须通过调用工具产出。
    如果你只用文字回复，用户那边就是一条干巴巴的消息，什么数据都看不到。
    所以：先想「哪个工具能给这个数据」，再决定说什么。
+
+9. **报告格式**：用户要求巡逻报告、PDF 或逐点位结果时调用 `export_patrol_report`；
+    只有用户明确要求 CSV/Excel 告警清单时才调用 `export_alerts`。
 
 ## 风格
 口语化、直接。中文。不要用「您好，我是...」这类客套开场。

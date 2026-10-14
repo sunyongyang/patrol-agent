@@ -220,6 +220,29 @@ def _run_tool(name: str, args: dict, chat_id: str, user_id: str) -> list[Reply]:
         )
         return _export_replies(items, cond)
 
+    if name == "export_patrol_report":
+        try:
+            path, summary = T.build_patrol_pdf(args.get("date"))
+        except ValueError as exc:
+            return [Reply(kind="card", card=fc.result_card("⚠️ 日期格式不正确", str(exc), ok=False))]
+        except Exception as exc:  # noqa: BLE001
+            log.exception("生成巡逻 PDF 失败")
+            return [Reply(kind="card", card=fc.result_card(
+                "⚠️ PDF 报告生成失败", f"{type(exc).__name__}: {exc}", ok=False))]
+        if path is None:
+            return [Reply(kind="card", card=fc.result_card(
+                "📄 没有巡逻记录", f"{summary['day']} 没有可导出的巡逻轮次。", ok=False))]
+        caption = (
+            f"巡逻报告 PDF · {summary['day']}\n"
+            f"{summary['runs']} 轮，{summary['points']} 个点位；"
+            f"异常 {summary['abnormal']}，正常 {summary['normal']}，未完成 {summary['unfinished']}。"
+        )
+        if summary["image_missing"]:
+            caption += f"\n有 {summary['image_missing']} 个点位的历史图片文件缺失。"
+        if summary["has_mock"]:
+            caption += "\n报告含模拟检测数据。"
+        return [Reply(kind="file", file_path=str(path), caption=caption)]
+
     if name == "show_help":
         return [Reply(kind="card", card=fc.help_card())]
 

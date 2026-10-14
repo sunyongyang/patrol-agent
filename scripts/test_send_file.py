@@ -2,13 +2,13 @@
 """验证飞书「发文件」通道（不启动长连接）。
 
 用法：
-    .venv\\Scripts\\python.exe scripts\\test_send_file.py              # 发最新的导出 CSV
-    .venv\\Scripts\\python.exe scripts\\test_send_file.py 路径.csv
+    .venv\\Scripts\\python.exe scripts\\test_send_file.py              # 优先发最新 PDF
+    .venv\\Scripts\\python.exe scripts\\test_send_file.py 路径.pdf
 
 为什么单独做这个：
     卡片、图片、文本三种消息类型都实测过了，唯独「文件」是新引入的
     （im/v1/files 上传 + msg_type=file 发送）。这条链路要先确认可用，
-    否则用户在飞书里点「导出 CSV」会直接失败。
+    现在用于验证 PDF/CSV 附件发送链路。
 """
 
 from __future__ import annotations
@@ -28,12 +28,15 @@ def main() -> int:
     if len(sys.argv) > 1:
         target = Path(sys.argv[1])
     else:
-        csvs = sorted(EXPORT_DIR.glob("*.csv"), key=lambda p: p.stat().st_mtime, reverse=True)
-        if not csvs:
-            print(f"{FAIL} {EXPORT_DIR} 下没有 CSV，先跑一次导出")
-            print("      .venv\\Scripts\\python.exe scripts\\test_agent_local.py \"导出最近 7 天的告警\"")
+        exports = sorted(
+            [*EXPORT_DIR.glob("*.pdf"), *EXPORT_DIR.glob("*.csv")],
+            key=lambda p: (p.suffix.lower() == ".pdf", p.stat().st_mtime),
+            reverse=True,
+        )
+        if not exports:
+            print(f"{FAIL} {EXPORT_DIR} 下没有 PDF/CSV 文件，先生成一份导出")
             return 1
-        target = csvs[0]
+        target = exports[0]
 
     if not target.exists():
         print(f"{FAIL} 文件不存在: {target}")
@@ -69,7 +72,7 @@ def main() -> int:
             print(f"{FAIL} 发送给 {open_id} 失败")
         adapter.send_text(
             chat_id,
-            f"📄 通道验证：这是一次手动的 CSV 发送测试\n文件：{target.name}（{size_kb:.1f} KB）",
+            f"📄 通道验证：这是一次手动的附件发送测试\n文件：{target.name}（{size_kb:.1f} KB）",
         )
 
     print(f"\n{'[OK]' if sent else FAIL} 完成，成功 {sent}/{len(contacts)}")

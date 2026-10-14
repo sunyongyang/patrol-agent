@@ -173,7 +173,7 @@ class FeishuAdapter:
         return resp.json()["data"]["message_id"]
 
     def upload_file(self, path: str, file_type: str = "stream") -> str | None:
-        """上传文件，返回 file_key。CSV/Excel 用 file_type=stream。"""
+        """上传文件，返回 file_key。PDF/CSV/Excel 用 file_type=stream。"""
         p = Path(path)
         if not p.exists():
             log.warning("文件不存在，跳过上传: %s", path)

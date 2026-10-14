@@ -383,6 +383,21 @@ class VirtualRobot:
                              run_id or "manual", dec.alert_type, dec.level,
                              dec.detection.label, dec.count, dec.detection.confidence)
 
+        if record and run_id:
+            repo.insert_patrol_capture(
+                run_id=run_id,
+                point_id=pt.id,
+                algorithm_id=pt.algorithm_id,
+                algorithm_name=pt.algorithm.name,
+                result_status="abnormal" if decisions else "normal",
+                detections=[d.to_dict() for d in bound],
+                alert_id=result.get("alert_id"),
+                image_path=image_path,
+                raw_image_path=raw_path,
+                infer_ms=round(infer_ms),
+                is_mock=self.detector.is_mock,
+            )
+
         return result
 
     # ------------------------------------------------------------ 回调 Agent

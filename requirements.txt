@@ -13,6 +13,7 @@ lark-oapi>=1.7
 pyyaml>=6.0
 requests>=2.31
 pillow>=10.0
+reportlab>=4.0
 
 # --- Web 服务（M1 机器人模拟器 / M3 Agent 服务）---
 fastapi>=0.110

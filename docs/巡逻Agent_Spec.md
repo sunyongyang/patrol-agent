@@ -1,8 +1,8 @@
 ---
 tags: [安防巡逻, Agent, spec, 实验项目, python]
 status: 开发中（已评审）
-version: V1.1
-date: 2026-10-13
+version: V1.2
+date: 2026-10-14
 ---
 
 # 巡逻 Agent Demo 需求规格说明书（Spec）
@@ -51,6 +51,7 @@ date: 2026-10-13
 | 巡逻轮次 Run | 任务的一次实际执行 |
 | 检测 Detection | 一次拍照产生的单条模型输出（COCO 类别） |
 | 告警 Alert | 由检测经场景映射与规则判定升级而来、需人工关注的记录 |
+| 点位拍摄记录 PatrolCapture | 一次巡逻轮次中某点位的算法结论、检测摘要与图像证据 |
 | 就位窗口 | 两个点位拍照之间的间隔，供现场摆放目标物以制造真实差异 |
 
 ---
@@ -61,20 +62,20 @@ date: 2026-10-13
 flowchart LR
     subgraph IM["IM 通道"]
         FS["飞书自建应用<br/>(长连接 WSS)"]
-        WX["微信通道<br/>(待定 D1)"]
+        WX["微信通道<br/>(未实现)"]
     end
 
     subgraph AGENT["Agent 服务 :8200"]
-        AD["接入适配层<br/>FeishuAdapter / WecomAdapter"]
+        AD["接入适配层<br/>FeishuAdapter"]
         ORC["编排层<br/>意图识别 + 工具调用 + 会话记忆"]
-        TOOL["工具层<br/>8 个 Tool"]
-        RPT["报表引擎<br/>卡片渲染 / 降级渲染"]
-        SCH["调度器<br/>定时任务 + 主动推送"]
+        TOOL["工具层<br/>读写工具 + CSV / PDF 导出"]
+        RPT["报表引擎<br/>日报卡片 / 告警 CSV / 巡逻 PDF"]
+        SCH["调度器<br/>每日 08:30 日报"]
     end
 
     subgraph ROBOT["机器人模拟器 :8100"]
         SIM["虚拟机器人 R-01"]
-        CAM["摄像头采集<br/>2K USB Camera"]
+        CAM["摄像头采集<br/>1280×720"]
         DET["检测管道<br/>YOLO 真实推理"]
         MAP["场景映射器<br/>COCO 类 → 安防语义"]
     end
@@ -83,7 +84,6 @@ flowchart LR
     LLM["LLM API<br/>(OpenAI 兼容)"]
 
     FS --> AD
-    WX --> AD
     AD --> ORC
     ORC <--> LLM
     ORC --> TOOL
@@ -106,7 +106,7 @@ flowchart LR
 
 ## 4. 工程结构
 
-工作区：`D:\code\patrol_agent`（当前为空目录，需 `git init`）
+工作区：`D:\code\patrol_agent`。以下为当前已实现的主要结构：
 
 ```
 patrol_agent/
@@ -120,40 +120,22 @@ patrol_agent/
 ├─ models/
 │  └─ yolov8n.pt               # 权重（不入 git）
 ├─ robot_sim/                  # 机器人模拟器 :8100
-│  ├─ main.py
-│  ├─ robot.py                 # 虚拟机器人状态机
-│  ├─ camera.py                # 摄像头采集（opencv）
-│  ├─ detectors/
-│  │  ├─ base.py               # Detector 抽象接口
-│  │  ├─ yolo.py               # YOLO 真实推理（主路径，必需）
-│  │  └─ mock.py               # 降级用（未装 ultralytics 时兜底）
-│  └─ mapper.py                # COCO 类 + 点位标签 → 安防告警
+│  ├─ main.py                  # FastAPI 接口与生命周期
+│  ├─ robot.py                 # 巡逻状态机、抓拍、推理与回调
+│  ├─ camera.py                # OpenCV 摄像头采集
+│  ├─ annotate.py              # 带检测框结果图
+│  ├─ mapper.py                # 点位绑定算法 → 告警
+│  └─ detectors/               # YOLO / mock 检测器
 ├─ agent_service/              # Agent 服务 :8200
-│  ├─ main.py
-│  ├─ im/
-│  │  ├─ base.py               # InboundMessage / OutboundMessage 抽象
-│  │  ├─ feishu.py             # 飞书适配（长连接）
-│  │  └─ wecom.py              # 微信适配
-│  ├─ core/
-│  │  ├─ orchestrator.py       # 编排主循环
-│  │  ├─ intents.py            # 意图定义
-│  │  ├─ memory.py             # 会话上下文
-│  │  └─ llm.py                # LLM 客户端封装
-│  ├─ tools/                   # 8 个工具
-│  ├─ report/
-│  │  ├─ builder.py            # 数据 → 报表模型
-│  │  ├─ feishu_card.py        # 飞书卡片渲染
-│  │  └─ plain_text.py         # 微信降级渲染
-│  └─ scheduler.py             # APScheduler 定时推送
-├─ shared/
-│  ├─ db.py                    # SQLite 连接与迁移
-│  ├─ models.py                # 数据模型
-│  └─ schemas.py               # 接口契约
-├─ scripts/
-│  ├─ seed_demo.py             # 造历史数据，让日报一上来就好看
-│  └─ demo.sh                  # 一键起服务
-├─ logs/
-└─ tests/
+│  ├─ main.py                  # FastAPI、飞书长连接、每日推送
+│  ├─ core/                    # LLM、意图、会话记忆、编排
+│  ├─ im/                      # IM 抽象与飞书适配
+│  ├─ tools/patrol.py          # 任务、查询、导出等工具
+│  └─ report/                  # 报表模型、卡片、CSV、逐点 PDF
+├─ shared/                     # config、SQLite schema、repository、scene
+├─ scripts/                    # 自检、冒烟、联调、演示数据脚本
+├─ data/                       # SQLite、图片、导出文件
+└─ docs/                       # Spec、交互设计、飞书配置清单
 ```
 
 ---
@@ -177,20 +159,20 @@ patrol_agent/
 
 | 点位 | 业务标签 | 检测目标 | 映射告警 | 图像来源 |
 |---|---|---|---|---|
-| `P1` | 人员检测 · 东侧通道 | `person` | **人员闯入** | 2K USB Camera 抓帧 |
-| `P2` | 遗留物检测 · 西侧通道 | `book` | **遗留物** | 2K USB Camera 抓帧 |
+| `P1` | 东侧通道 | `person` | **人员闯入** | 共享摄像头抓帧 |
+| `P2` | 西侧通道 | `chair` | **通道占用** | 共享摄像头抓帧 |
 
 **执行逻辑**：
 1. 到达点位 → 抓取当前帧 → YOLO 推理 → 场景映射 → 落库
 2. 点位之间插入 `dwell_sec`（默认 **30s**）的**就位窗口**
-3. 完成全部点位 → 结束轮次
+3. 任务接受时创建 Run；点位完成时更新 `points_done`；任务结束时写 Run 状态与结束时间
 
 **就位窗口的用法（这是演示脚本的一部分）**：
 
 | 现场动作 | 效果 |
 |---|---|
 | P1 拍照前**走到镜头前** | 真的检出 `person` → 人员闯入告警 |
-| P2 拍照前**放一本书到镜头前并退开** | 真的检出 `book` → 遗留物告警 |
+| P2 拍照前**在通道放置椅子等占用物** | 检出 `chair` 且达到阈值 → 通道占用告警 |
 | 什么都不做 | 两帧一致，链路完整性依然可验证 |
 
 **关键设计：每个点位只关心自己配置的目标类别。** 其他类别仍会落库进 `detection` 表（保留原始证据），但不生成告警。这样即使书一直在桌上、人也一直在画面里，两个点位的告警也不会互相污染。
@@ -221,15 +203,15 @@ YOLO COCO 80 类的真实能力边界，对照 [[巡逻场景：七大场景]] �
 | 七大场景算法能力 | COCO 支撑 | V1 处理 |
 |---|---|---|
 | 人员类：越界闯入 / 徘徊逗留 / 聚集 / 禁区入侵 | ✅ 能（`person`） | ✅ **P1 实现（仅"人员闯入"一档）** |
-| 物体类：遗留物 / 遗弃包裹 | 🟡 部分（`backpack` `handbag` `suitcase` `book` 等） | ✅ **P2 实现（用 `book` 代表）** |
-| 物体类：通道占用 / 违规堆放 | 🟡 部分（`chair` `couch` 等） | ⏸ V1.5 |
+| 物体类：遗留物 / 遗弃包裹 | 🟡 部分（`backpack` `handbag` `suitcase` 等） | ⏸ 未实现 |
+| 物体类：通道占用 / 违规堆放 | 🟡 部分（`chair` `couch` 等） | ✅ **P2 实现（以 chair 为代理目标）** |
 | 物体类：封条状态识别 | ❌ 不能 | ❌ 排除 |
 | 行为类：翻越攀爬 / 奔跑 / 聚众冲突 / 抽烟 | ❌ 不能 | ❌ 排除 |
 | 环境设备类：烟火烟雾 / 漏水 / 围栏破损 / 门窗破损 / 消防设施损坏 / 照明失效 | ❌ 不能 | ❌ 排除 |
 
-**结论**：V1 的真实检测目标 = **`person` 与 `book`**，对应**人员闯入**与**遗留物**两类告警。其余能力在 COCO 下无法产出，**明确不做**，绝不用模拟数据凑数。
+**结论**：当前实现的目标类别为 **`person` 与 `chair`**，对应**人员闯入**与**通道占用**。COCO 无法支持的能力明确不做，绝不用模拟数据冒充真实推理。
 
-**为什么用 `book` 代表遗留物**：COCO 里没有"遗留物"这个类。"遗留物品"的视觉本质就是"出现在不该出现位置的离散小物体"，`book` 是可靠、易布置、置信度高的代理目标，且语义上完全讲得通（书本遗落在通道 = 遗留物）。
+**为什么用 `chair` 代表通道占用**：COCO 里没有原生的「通道占用」类别，当前用椅子作为占用通道的代理目标。报告必须标明这是代理检测，不得描述成通用障碍物识别。
 
 **升级路径**（V2 可选）：换开放词汇检测模型（YOLO-World / GroundingDINO），用文本 prompt 直接检 `fire` / `smoke` / `wall damage` 等自定义词，即可覆盖更多场景。需重新评估办公室场景下的实际检出率。
 
@@ -245,7 +227,7 @@ class SceneMapper:
 | 点位 | 目标类别 | 置信度阈值 | 判定告警 | 等级 |
 |---|---|---|---|---|
 | `P1` | `person` | ≥ 0.60 | `人员闯入` | 紧急 |
-| `P2` | `book` | ≥ 0.50 | `遗留物` | 一般 |
+| `P2` | `chair` | ≥ 0.45 | `通道占用` | 一般 |
 
 **规则近似说明**：「闯入」本质是**行为**，而 COCO 只提供 `person` 框。V1 的判定是「点位 P1 检出 person 且置信度达标 → 人员闯入」，可用 `zone` 配置扩展为「落在禁区多边形内才算闯入」。这是**规则近似，不是行为识别模型**，报表与卡片上必须如实标注，不宣称具备行为识别能力。
 
@@ -290,18 +272,23 @@ class SceneMapper:
 
 ### 6.2 意图与工具映射
 
-意图清单见 [[巡逻Agent_交互设计]] 第 3 节。工具清单：
+意图清单见 [[巡逻Agent_交互设计]] 第 3 节。以下为当前 function-calling 工具清单（名称以 `agent_service/core/intents.py` 为准）：
 
 | 工具 | 签名（简化） | 对应意图 |
 |---|---|---|
-| `create_patrol_task` | `(route_id, start_at, repeat, robot_id) -> task` | `task.create` |
-| `list_tasks` | `(status, limit) -> list[task]` | `task.list` |
-| `cancel_task` | `(task_id) -> ok` | `task.cancel` |
-| `get_report` | `(kind, date_range) -> ReportModel` | `report.*` |
-| `query_history` | `(date_range, alert_type, point, limit) -> list[detection]` | `history.query` |
-| `get_robot_status` | `(robot_id) -> status` | `robot.status` |
-| `capture_now` | `(point_id) -> image_path` | `snapshot.now` |
-| `handle_alert` | `(alert_id, action) -> ok` | `alert.handle` |
+| `get_daily_report` | `(date) -> 日报卡片` | 日报查询 |
+| `list_alerts` | `(status, alert_type, point_id, limit)` | 告警列表 |
+| `query_history` | `(days_back, alert_type, point_id, limit)` | 历史告警查询 |
+| `list_tasks` | `(status, limit)` | 任务列表 |
+| `prepare_patrol_task` | `(route_id) -> 确认卡` | 创建巡逻任务（两段式） |
+| `cancel_task` | `(task_id) -> 取消结果` | 取消任务 |
+| `get_robot_status` | `() -> 状态卡` | 机器人状态 |
+| `capture_now` | `(point_id) -> 图片 + 检测摘要` | 手动抓拍 |
+| `handle_alert` | `(alert_id/index, action, note)` | 告警处置 |
+| `export_alerts` | `(days_back, alert_type, point_id, status, limit) -> CSV` | 告警明细导出 |
+| `export_patrol_report` | `(date) -> PDF` | 逐轮次、逐点位巡逻报告 |
+| `advance_patrol` | `() -> 加速结果` | 跳过当前就位等待 |
+| `show_help` | `() -> 能力卡` | 帮助 |
 
 ### 6.3 会话记忆
 
@@ -314,7 +301,8 @@ class SceneMapper:
 
 - 写操作解析结果写入 `pending_actions` 表，带 `expires_at`（默认 10 分钟）
 - 用户点击确认 → 校验 `pending_action` 是否过期 → 执行
-- 这是**唯一允许触碰机器人模拟器写接口的路径**，编排层不直接调用 `POST /tasks`
+- 创建巡逻任务必须走此路径，编排层不直接调用 `POST /tasks`
+- **当前实现差异**：`cancel_task` 工具会直接调用模拟器取消接口，没有 pending 确认；见附录 A.7。恢复「所有写操作二次确认」的不变量前，不应把该行为描述为已受保护
 
 ### 6.5 报表引擎
 
@@ -322,7 +310,10 @@ class SceneMapper:
 |---|---|---|---|
 | 日报 | runs + detections + alerts | 任务完成率、覆盖率、告警数、待处置数、离线次数 | ✅ |
 | 告警清单 | alerts | 按等级/状态/时间排序 | ✅ |
+| 巡逻结果 PDF | runs + route points + patrol_capture / detections | 每轮每点位状态、绑定算法、检测摘要、图像证据 | ✅ 按日导出 |
 | 周报 | 日报聚合 | 趋势、环比、异常类型分布 | ⏸ V1.5 |
+
+巡逻 PDF 按日期汇总当天所有轮次，逐轮列出路线计划中的点位、绑定算法、阈值、检测摘要、运行状态及图片证据。异常点位使用标注帧，正常点位使用原始帧；未执行的点位标为「未完成」。旧轮次优先从 `detection` 与命名匹配的图片文件回补；没有巡逻证据的点位标为未完成，图片文件缺失会单独提示，不会推断为正常。
 
 **覆盖率 / 路径完成率** 的正确定义参见 [[巡逻覆盖率和路径完成率]] 与 [[安防巡逻覆盖率KPI-深度规格]]，Demo 阶段先用简化口径并在报表脚注标注。
 
@@ -350,20 +341,19 @@ class SceneMapper:
 - 需权限（4 项）：`im:message.p2p_msg:readonly`（收私聊）、`im:message.group_at_msg:readonly`（收群内@）、`im:message:send_as_bot`（发消息）、`im:resource`（发图/文件）
 - 群聊策略：**仅 @机器人 时响应**，私聊直接响应
 
-### 7.2 微信（V1 验证基础下发/查询）
+### 7.2 微信（当前未实现）
 
 - **通道形态待定（见交互设计 D1）**，倾向**企业微信自建应用**
-- V1 只需验证：文本下发任务 + 文本查询报表
-- 卡片能力缺失 → 走 `plain_text.py` 降级渲染 + 编号回复协议
+- 当前代码没有微信适配器，仍是后续版本候选，不属于已验收能力
 
 ### 7.3 适配层抽象
 
 ```python
 class IMAdapter(Protocol):
-    async def send_text(self, chat_id, text) -> str: ...
-    async def send_card(self, chat_id, card) -> str: ...
-    async def update_card(self, message_id, card) -> None: ...
-    async def send_image(self, chat_id, path) -> str: ...
+    def send_text(self, chat_id, text) -> str | None: ...
+    def send_card(self, chat_id, card) -> str | None: ...
+    def update_card(self, message_id, card) -> bool: ...
+    def send_image(self, chat_id, path) -> str | None: ...
     def capabilities(self) -> Capabilities: ...
 ```
 
@@ -376,7 +366,7 @@ class IMAdapter(Protocol):
 ```sql
 robot(id, name, model, status, battery, current_point, online, last_seen_at)
 
-point(id, name, area, target_label, conf_threshold, zone_json)
+point(id, name, area, algorithm_id, target_label, conf_threshold, zone_json)
 route(id, name, description)
 route_point(route_id, point_id, seq, dwell_sec)
 
@@ -384,16 +374,22 @@ task(id, robot_id, route_id, start_at, repeat_cron, status,
      created_by, created_at, source_channel)
 patrol_run(id, task_id, robot_id, started_at, ended_at, status,
            points_total, points_done)
+patrol_capture(id, run_id, point_id, algorithm_id, algorithm_name,
+           result_status, detections_json, alert_id, image_path,
+           raw_image_path, infer_ms, is_mock, created_at)
 
 detection(id, run_id, point_id, coco_label, confidence,
-          bbox_json, image_path, is_mock, created_at)
-alert(id, detection_id, level, alert_type, status,   -- pending|confirmed|false_positive
-      handled_by, handled_at, pushed_at, card_message_id)
+        bbox_json, image_path, raw_image_path, is_mock, created_at)
+alert(id, detection_id, level, level_code, alert_type, status,
+    handled_by, handled_at, resolution_note, pushed_at, card_message_id,
+    occurrence_count, target_count, last_seen_at, created_at)
 
 message(id, channel, chat_id, user_id, direction, content_json, created_at)
 pending_action(id, chat_id, user_id, intent, payload_json,
                status, expires_at, created_at)
 ```
+
+`patrol_capture` 每个已拍摄的巡逻点位写一行，所以零检测也能记录「正常」、绑定算法和原始照片路径；`detection` 继续保留模型输出，`alert` 只保留升级后的业务事件。当前不存在 `id_seq` 表；业务编号通过 `shared.db.next_id()` 生成。
 
 **可追溯性要求（关键）**：`detection` 存**原始 COCO 输出**（全类别），`alert` 存**映射后语义**，两者分离。每条 Alert 必须能溯源到 `detection → patrol_run → task → 发起人`。
 
@@ -410,9 +406,9 @@ pending_action(id, chat_id, user_id, intent, payload_json,
 | LLM 时延兜底 | 超过 3s 先回占位消息，完成后 patch 更新 |
 | 幂等 | 飞书可能重复推送，**必须用 `message_id` 去重**（官方明确：不要依赖 `event_id`） |
 | 配置外置 | 所有密钥走 `config.yaml` / 环境变量，**不入库、不进 git** |
-| 日志 | 结构化日志落 `logs/`，按天切分 |
-| 数据保留 | Demo 数据保留 90 天 |
-| 图像留存 | 告警原图保留 90 天，路径入库 |
+| 日志 | Python logging 输出到服务标准错误；后台运行时由启动方式重定向到 `logs/` |
+| 数据保留 | 当前无自动 90 天清理任务，需人工维护 |
+| 图像留存 | 图片路径入库；当前无自动过期删除 |
 
 ---
 
@@ -426,14 +422,14 @@ pending_action(id, chat_id, user_id, intent, payload_json,
 | 2 | 「让机器人去巡逻一圈」 | 返回确认卡，核对为 2 个点位 |
 | 3 | 点「确认下发」 | 回执卡带任务号 |
 | 4 | **P1 就位窗口内走到镜头前**；用 `/sim/advance` 加速 | 飞书**主动收到**人员闯入告警卡（带真实抓拍图） |
-| 5 | **P2 就位窗口内放一本书并退开** | 收到遗留物告警卡（带真实抓拍图） |
+| 5 | **P2 就位窗口内放置椅子等占用物并退开** | 收到通道占用告警卡（带真实抓拍图） |
 | 6 | 点「标记误报」 | 原卡片就地更新为已处置 |
 | 7 | 「上周有没有人员闯入的告警」 | 返回历史查询卡，**刚处置那条状态正确** |
-| 8 | 微信侧重复步骤 1 和 2 的文本版 | 文本降级版正常返回 |
+| 8 | 「导出今天的巡逻报告 PDF」 | 收到包含每轮、每点位状态与图像证据的 PDF；异常用标注图，正常用原始图 |
 
-**通过判据**：8 步全过，无人工干预，无报错弹窗。
+**通过判据**：8 步全过，无人工干预，无报错弹窗。微信不属于当前验收范围。
 
-**真实性判据（这条不能被绕过）**：步骤 4、5 的告警必须能在库里各追到一条 `is_mock=false` 的 detection，且其 `coco_label` 分别为 `person` 与 `book`。
+**真实性判据（这条不能被绕过）**：步骤 4、5 的告警必须能在库里各追到一条 `is_mock=false` 的 detection，且其 `coco_label` 分别为 `person` 与 `chair`。
 
 ---
 
@@ -444,8 +440,8 @@ pending_action(id, chat_id, user_id, intent, payload_json,
 | M0 | 工程骨架 + git init + 配置体系 + SQLite | 0.5 天 |
 | M1 | 机器人模拟器：状态机、摄像头、YOLO 推理管道、场景映射、REST | 2 天 |
 | M2 | 数据模型 + `seed_demo.py` 造历史数据 | 0.5 天 |
-| M3 | Agent 编排 + 8 个工具 + 意图路由 | 2 天 |
-| M4 | 报表引擎 + 飞书卡片渲染 | 1 天 |
+| M3 | Agent 编排 + function-calling 工具 + 意图路由 | 2 天 |
+| M4 | 日报、告警 CSV、逐点巡逻 PDF + 飞书卡片渲染 | 1 天 |
 | M5 | 飞书长连接接入打通（**含你需要在开放平台的操作**） | 1 天 |
 | M6 | 主动推送 + 告警就地处置（patch 卡片） | 1 天 |
 | M7 | 微信通道 + 降级渲染 | 1 天 |
@@ -468,7 +464,7 @@ pending_action(id, chat_id, user_id, intent, payload_json,
 | R3 | 两个点位共用一台摄像头，画面相同 | 演示单薄 | 就位窗口（§5.2）供现场摆人/摆书制造真实差异；不改代码 |
 | R4 | **COCO 80 类覆盖不了烟火/行为/设备破损** | **已收窄范围** | §5.4 明确排除，不用模拟数据凑数；V2 可换开放词汇模型 |
 | R5 | `ultralytics` 带入 torch（约 1-2GB） | 装环境慢 | 标为必需依赖，环境准备阶段先装；保留 Mock 降级 |
-| R6 | `book` 在远景/侧视下检出率低于 `person` | 中 | 演示时把书放到镜头前 1-2 米内、正面朝向；必要时降到 `yolov8s.pt` |
+| R6 | `chair` 检出率受距离、角度和画面影响 | 中 | 演示时将占用物放到镜头前并确保进入视野；结果按配置阈值判定 |
 | R7 | 行为判定用规则近似，非真实行为识别 | 中 | 报表与卡片如实标注，不宣称行为识别能力 |
 | R8 | 报表"覆盖率"口径若不统一，数字会被质疑 | 中 | 明确复用现有 KPI 定义并标注口径来源 |
 | R9 | LLM 幻觉下发错误任务 | 中 | 二次确认卡机制（§6.4）为强制路径 |
@@ -477,7 +473,7 @@ pending_action(id, chat_id, user_id, intent, payload_json,
 
 - [x] **飞书自建应用**：✅ 完成并实测（`cli_aa44…`（见本地 `config/config.yaml`，不随仓库分发），机器人「巡逻agent」）——长连接、收消息、发文本、发图片、发卡片、按钮回调、PATCH 更新，**7 项全通过**
 - [x] **LLM**：✅ DeepSeek 官方 API（`deepseek-chat`），function calling 实测稳定
-- [x] 点位业务标签：✅ `P1 人员检测·东侧通道` / `P2 遗留物检测·西侧通道`
+- [x] 点位业务标签：✅ `P1 人员闯入·东侧通道` / `P2 通道占用·西侧通道`
 - [x] 部署位置：✅ 本机
 - [ ] 演示现场配合就位动作（P1 站人、P2 放书）——演示当天确认
 - [ ] 微信通道形态——延后，飞书跑通后再定
@@ -491,10 +487,10 @@ pending_action(id, chat_id, user_id, intent, payload_json,
 | # | 问题 | 结论 |
 |---|---|---|
 | Q1 | 单机 vs 多机 | ✅ **单机 R-01**，数据模型保留 `robot_id` 以便日后扩展 |
-| Q2 | 历史数据导出 CSV | ⏸ **延后**，不进 V1 |
+| Q2 | 历史数据导出 | ✅ CSV 导出告警明细；按日 PDF 导出完整巡逻轮次与点位结果 |
 | Q3 | 证据链（回溯抓拍原图 + 原始 COCO 输出） | ✅ **进 V1** |
 | Q4 | 部署位置 | ✅ 本机（`2K USB Camera` 在此） |
-| Q5 | 场景范围 | ✅ 只做 `person` / `book` |
+| Q5 | 场景范围 | ✅ 只做 `person` / `chair` |
 | Q6 | LLM | ✅ **DeepSeek 官方 API**（`deepseek-chat`） |
 | Q7 | 微信通道 | ⏸ **延后**到飞书链路跑通之后 |
 | Q8 | 推送策略 | ✅ 告警实时推 + 日报每日 08:30 定时推 |
@@ -520,6 +516,7 @@ pending_action(id, chat_id, user_id, intent, payload_json,
 | V0.4 | 2026-10-13 | 依飞书官方文档修正幂等策略（改用 `message_id` 去重，`event_id` 不可靠）；新增配套文档 [[飞书开放平台配置清单]] |
 | V1.0 | 2026-10-13 | **评审通过，进入开发**。8 项待决问题全部确认（§13）；前置项完成飞书应用与 LLM 接入并实测通过；新增联调发现 F1–F4 |
 | V1.1 | 2026-10-14 | 新增**附录 A · 实现现状**：记录「点位绑定算法」模型、告警抑制、数据模型实际字段、指标口径修正、实测数据、8 个已踩的坑、尚未实现清单。正文为设计意图，附录为实现事实，冲突以附录为准 |
+| V1.2 | 2026-10-14 | 对齐当前代码：明确 `person/chair` 与微信未实现状态；补充 CSV 告警导出和逐点位巡逻 PDF、`patrol_capture` 数据模型、旧轮次缺图/无证据处理与 PDF 验收；移除重复 PDF 条目及不存在的 `id_seq` 描述 |
 
 ---
 
@@ -592,7 +589,9 @@ _最后更新：2026-10-14 · 状态：开发中（已实现并可端到端演�
 | `target_count` | 本次拍照里命中该目标的**个数**（画面里 3 人 → 3） |
 | `last_seen_at` | 最近一次出现时间 |
 
-`point` 新增 `algorithm_id`；另有 `id_seq` 表用于流水号生成（见 A.7）。
+`patrol_capture` 新增：每个已执行抓拍的轮次点位保存算法 ID/名称、正常或异常结论、绑定类别检测摘要、告警 ID、标注图与原图路径、推理耗时、模拟/真实来源及时间。此记录保证零检测点位仍能在 PDF 中显示为正常并使用原始照片。
+
+`point` 新增 `algorithm_id`。当前数据库没有 `id_seq` 表，编号由 `shared.db.next_id()` 按业务表、前缀和日期生成。
 
 ## A.4 指标口径修正（原 §6.5 的指标名有误）
 
@@ -625,7 +624,7 @@ _最后更新：2026-10-14 · 状态：开发中（已实现并可端到端演�
 | 卡片回调同步处理 | 超过 3 秒触发飞书超时重试，且长连接单线程被堵住，后续消息一起变慢 | 回调**必须 3 秒内返回**：立刻回 toast，干活丢后台，干完 PATCH 就地更新 |
 | `detection_ids[0]` 关联告警 | P2 检出 `[person 0.92, chair 0.46]`，告警是 chair 却关联到 person，卡片显示「通道占用 · 原始输出 person 0.92」 | 要按**对象身份**匹配触发告警的那条检测，不能取下标 |
 | `Camera.probe()` 无条件 `close()` | `/health` 会调它 —— 任何一次健康检查都关掉常驻摄像头，下次抓帧重开要 6 秒 | 自检不该动共享句柄 |
-| `next_id` 用 `COUNT(*)+1` | seed 用全局计数器直接写 ID，两者规则不一致；一次跳号就撞主键，**用户点「确认下发」收到 500** | 编号必须用**独立计数器 + 存在性校验**，不能用 COUNT 推 |
+| 调用方自行用 `COUNT(*)+1` 拼编号 | 任务、轮次、告警等编号规则容易分叉并发生主键冲突 | 调用方统一使用 `shared.db.next_id()`；编号算法的并发安全仍需在多写入进程场景下重新评估 |
 | LLM 不知道当前日期 | 「昨天」被解析成训练数据里的日期 | system prompt **必须注入当前日期** |
 | 用 `event_id` 去重 | 去重失效 | 飞书官方明确：用 `message_id` 去重 |
 | 依赖 PATH 里的 python | 本机 PATH 指向另一个工具的 venv，装 torch 会污染它 | **项目独立 venv** |
@@ -636,10 +635,13 @@ _最后更新：2026-10-14 · 状态：开发中（已实现并可端到端演�
 |---|---|
 | 定时 / 重复巡逻 | ❌ `task.start_at` / `repeat_cron` 字段保留但**无调度器读取**。API 对未来的 `start_at` 明确返回 501，工具描述与确认卡也已移除承诺 |
 | 微信通道 | ❌ 飞书已完整验证，微信计划下一版 |
+| 周报 | ❌ 只有日报；无周报聚合工具 |
+| 取消任务二次确认 | ⚠️ `cancel_task` 当前直接调用模拟器取消接口，没有 `pending_action` 确认；与写操作二次确认不变量不一致 |
 | 角色与权限 | ❌ 告警目前 `broadcast_card` 发给**所有**已知联系人，且可能发到群里。上线前必须区分值班员/主管，并强制私聊 |
-| 周报 | ❌ 只有日报 |
 | 越界闯入的区域判定 | ⚙️ `zone` 字段与 `point_in_zone()` 已实现，但配置里未启用 |
 | 行为识别 | ❌ 「闯入/徘徊」是**规则近似**（点位检出即判定），不是行为识别模型，对外不得宣称 |
+
+CSV 告警明细导出与按日巡逻 PDF 均已实现，不属于未实现项。PDF 按轮次列出路线点位；异常选标注帧、正常选原始帧，未执行点位标为未完成。旧轮次只在存在 detection 和匹配图片证据时回补，缺证据不推断为正常；图片文件缺失会单独提示。
 
 ## A.8 代码与文档的对应关系
 
@@ -650,6 +652,17 @@ _最后更新：2026-10-14 · 状态：开发中（已实现并可端到端演�
 | §5.5 场景映射 | `config/mapping.yaml` + `robot_sim/mapper.py` |
 | §6.1 编排主循环 | `agent_service/core/orchestrator.py` |
 | §6.4 待确认动作 | `shared/repo.py` 的 `pending_action` + `agent_service/tools/patrol.py` |
+| §6.5 巡逻结果 PDF | `agent_service/report/patrol_pdf.py` + `patrol_capture` / `detection` |
 | §7.1 飞书接入 | `agent_service/im/feishu.py` |
 | §8 数据模型 | `shared/db.py`（SCHEMA）+ `shared/repo.py` |
 | §10 验收标准 | `scripts/smoke_robot_sim.py` + `scripts/test_agent_local.py` |
+
+## A.9 巡逻 PDF 与证据口径
+
+- 报告按本地日期筛选当天所有 `patrol_run`，并按路线配置展开每个计划点位。
+- 新巡逻每完成一次抓拍就写入一条 `patrol_capture`；零检测也保存 `normal` 结果与原图路径。
+- 点位命中绑定算法且达到阈值时标记 `abnormal`，报告选用带框标注图；否则标记 `normal`，报告选用未经绘制的原始帧。
+- 尚未完成的路线点位标记「未完成」；失败/取消轮次仍显示实际完成进度。
+- 旧轮次没有 `patrol_capture` 时，可用 `detection` 和 `*_raw.jpg` 文件名中的点位/轮次 ID 回补；没有巡逻证据时不得推断为正常。
+- 报告摘要区分未完成点位与图片文件缺失。历史图片如果已从 `data/images` 移除，PDF 无法恢复图像本身，只能标明缺失。
+- `is_mock` 在报告中明确标注，模拟检测不得伪装成 YOLO 真实推理。

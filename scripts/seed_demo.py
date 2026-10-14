@@ -74,7 +74,7 @@ def seed(days: int) -> None:
                 ended = min(started + duration, now)
 
                 tasks += 1
-                task_id = f"T-{started.strftime('%Y%m%d')}-{tasks:03d}"
+                task_id = db.next_id(conn, "task", "T", started.strftime("%Y%m%d"))
                 conn.execute(
                     """INSERT INTO task (id, robot_id, route_id, status, created_by,
                                          created_at, source_channel)
@@ -83,7 +83,7 @@ def seed(days: int) -> None:
                 )
 
                 runs += 1
-                run_id = f"RUN-{started.strftime('%Y%m%d')}-{runs:03d}"
+                run_id = db.next_id(conn, "patrol_run", "RUN", started.strftime("%Y%m%d"))
                 run_status = "completed" if rng.random() > 0.08 else "failed"
                 conn.execute(
                     """INSERT INTO patrol_run (id, task_id, robot_id, started_at, ended_at,
@@ -101,7 +101,7 @@ def seed(days: int) -> None:
 
                     # 每个点位先落一条「背景」检测（有检出但未必告警）
                     dets += 1
-                    det_id = f"D-{ts.strftime('%Y%m%d')}-{dets:04d}"
+                    det_id = db.next_id(conn, "detection", "D", ts.strftime("%Y%m%d"), width=4)
                     bg_label = {"P1": "person", "P2": "chair"}[point_id]
                     bg_conf = round(rng.uniform(0.36, 0.62), 3)
                     conn.execute(
@@ -124,7 +124,7 @@ def seed(days: int) -> None:
                     conf = round(rng.uniform(lo, hi), 3)
 
                     dets += 1
-                    det_id = f"D-{ts.strftime('%Y%m%d')}-{dets:04d}"
+                    det_id = db.next_id(conn, "detection", "D", ts.strftime("%Y%m%d"), width=4)
                     conn.execute(
                         """INSERT INTO detection (id, run_id, point_id, coco_label, confidence,
                                                   bbox_json, image_path, is_mock, created_at)
@@ -136,7 +136,7 @@ def seed(days: int) -> None:
                     )
 
                     alerts += 1
-                    alert_id = f"A-{ts.strftime('%Y%m%d')}-{alerts:04d}"
+                    alert_id = db.next_id(conn, "alert", "A", ts.strftime("%Y%m%d"), width=4)
                     # 近 2 天的留一部分待处置，好演示「现在有哪些没处理的告警」
                     if back <= 1 and rng.random() < 0.45:
                         status = "pending"
@@ -180,16 +180,14 @@ def ensure_demo_minimums() -> None:
             started = max(today_start + timedelta(hours=1), now - timedelta(hours=2))
             ended = now
             day_key = started.strftime("%Y%m%d")
-            seq = conn.execute("SELECT COUNT(*) AS n FROM task").fetchone()["n"] + 1
-            task_id = f"T-{day_key}-{seq:03d}"
+            task_id = db.next_id(conn, "task", "T", day_key)
             conn.execute(
                 """INSERT INTO task (id, robot_id, route_id, status, created_by,
                                      created_at, source_channel)
                    VALUES (?, ?, 'standard_patrol', 'completed', 'seed', ?, 'seed')""",
                 (task_id, rp.id, started.isoformat(timespec="seconds")),
             )
-            rseq = conn.execute("SELECT COUNT(*) AS n FROM patrol_run").fetchone()["n"] + 1
-            run_id = f"RUN-{day_key}-{rseq:03d}"
+            run_id = db.next_id(conn, "patrol_run", "RUN", day_key)
             conn.execute(
                 """INSERT INTO patrol_run (id, task_id, robot_id, started_at, ended_at,
                                            status, points_total, points_done)
@@ -202,8 +200,7 @@ def ensure_demo_minimums() -> None:
 
             for point_id, label, atype, level_code, (lo, hi) in ALERT_POOL:
                 ts = started + timedelta(seconds=rng.randint(30, 120))
-                dseq = conn.execute("SELECT COUNT(*) AS n FROM detection").fetchone()["n"] + 1
-                det_id = f"D-{ts.strftime('%Y%m%d')}-{dseq:04d}"
+                det_id = db.next_id(conn, "detection", "D", ts.strftime("%Y%m%d"), width=4)
                 conf = round(rng.uniform(lo, hi), 3)
                 conn.execute(
                     """INSERT INTO detection (id, run_id, point_id, coco_label, confidence,
@@ -213,8 +210,7 @@ def ensure_demo_minimums() -> None:
                      json.dumps([120, 90, 640, 520]),
                      ts.isoformat(timespec="seconds")),
                 )
-                aseq = conn.execute("SELECT COUNT(*) AS n FROM alert").fetchone()["n"] + 1
-                alert_id = f"A-{ts.strftime('%Y%m%d')}-{aseq:04d}"
+                alert_id = db.next_id(conn, "alert", "A", ts.strftime("%Y%m%d"), width=4)
                 conn.execute(
                     """INSERT INTO alert (id, detection_id, level, level_code, alert_type,
                                           status, created_at)
@@ -240,8 +236,7 @@ def ensure_demo_minimums() -> None:
                     "SELECT id FROM patrol_run ORDER BY started_at DESC LIMIT 1"
                 ).fetchone()
                 run_id = run_row["id"] if run_row else "RUN-seed"
-                dseq = conn.execute("SELECT COUNT(*) AS n FROM detection").fetchone()["n"] + 1
-                det_id = f"D-{ts.strftime('%Y%m%d')}-{dseq:04d}"
+                det_id = db.next_id(conn, "detection", "D", ts.strftime("%Y%m%d"), width=4)
                 conn.execute(
                     """INSERT INTO detection (id, run_id, point_id, coco_label, confidence,
                                               bbox_json, image_path, is_mock, created_at)
@@ -250,8 +245,7 @@ def ensure_demo_minimums() -> None:
                      json.dumps([150, 110, 700, 560]),
                      ts.isoformat(timespec="seconds")),
                 )
-                aseq = conn.execute("SELECT COUNT(*) AS n FROM alert").fetchone()["n"] + 1
-                alert_id = f"A-{ts.strftime('%Y%m%d')}-{aseq:04d}"
+                alert_id = db.next_id(conn, "alert", "A", ts.strftime("%Y%m%d"), width=4)
                 conn.execute(
                     """INSERT INTO alert (id, detection_id, level, level_code, alert_type,
                                           status, created_at)

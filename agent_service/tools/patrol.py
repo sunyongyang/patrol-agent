@@ -81,6 +81,13 @@ def build_export(items: list[AlertItem], condition: str = "") -> Path:
     return csv_export.build_csv(items, condition)
 
 
+def build_patrol_pdf(day: str | None = None) -> tuple[Path | None, dict]:
+    """生成按日汇总的逐点位巡逻 PDF。"""
+    from agent_service.report.patrol_pdf import build_patrol_pdf as build
+
+    return build(day)
+
+
 def list_tasks(status: str | None = None, limit: int = 5) -> list[dict]:
     return repo.list_tasks(status=status, limit=limit)
 
