@@ -188,11 +188,19 @@ def get_run(run_id: str) -> dict | None:
         return dict(row) if row else None
 
 
-def run_for_task(task_id: str) -> dict | None:
+def run_for_task(task_id: str, created_by: str | None = None) -> dict | None:
+    join = ""
+    where = "pr.task_id=?"
+    params: list[Any] = [task_id]
+    if created_by is not None:
+        join = "JOIN task t ON t.id = pr.task_id"
+        where += " AND t.created_by=?"
+        params.append(created_by)
     with connect() as conn:
         row = conn.execute(
-            "SELECT * FROM patrol_run WHERE task_id=? ORDER BY started_at DESC LIMIT 1",
-            (task_id,),
+            f"SELECT pr.* FROM patrol_run pr {join} WHERE {where} "
+            "ORDER BY pr.started_at DESC LIMIT 1",
+            params,
         ).fetchone()
         return dict(row) if row else None
 
@@ -209,6 +217,51 @@ def list_patrol_runs(since: str, until: str) -> list[dict]:
             ORDER BY pr.started_at, pr.id
             """,
             (since, until),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
+def get_patrol_run_detail(run_id: str, created_by: str | None = None) -> dict | None:
+    where = "pr.id=?"
+    params: list[Any] = [run_id]
+    if created_by is not None:
+        where += " AND t.created_by=?"
+        params.append(created_by)
+    with connect() as conn:
+        row = conn.execute(
+            f"""
+            SELECT pr.*, t.route_id, t.created_by, r.name AS route_name
+            FROM patrol_run pr
+            LEFT JOIN task t ON t.id = pr.task_id
+            LEFT JOIN route r ON r.id = t.route_id
+            WHERE {where}
+            """,
+            params,
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def latest_patrol_runs(
+    limit: int = 20, created_by: str | None = None
+) -> list[dict]:
+    where = ""
+    params: list[Any] = []
+    if created_by is not None:
+        where = "WHERE t.created_by=?"
+        params.append(created_by)
+    params.append(max(1, int(limit)))
+    with connect() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT pr.*, t.route_id, t.created_by, r.name AS route_name
+            FROM patrol_run pr
+            LEFT JOIN task t ON t.id = pr.task_id
+            LEFT JOIN route r ON r.id = t.route_id
+            {where}
+            ORDER BY pr.started_at DESC, pr.id DESC
+            LIMIT ?
+            """,
+            params,
         ).fetchall()
         return [dict(row) for row in rows]
 

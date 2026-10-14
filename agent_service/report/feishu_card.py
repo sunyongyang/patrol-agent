@@ -25,6 +25,9 @@ ACT_ALERT_DETAIL = "alert_detail"
 ACT_ALERTS_MORE = "alerts_more"
 ACT_ADVANCE = "advance"
 ACT_HELP = "help"
+ACT_REPORT_SCOPE = "report_scope"
+ACT_REPORT_PERIOD = "report_period"
+ACT_REPORT_RUN = "report_run"
 
 LEVEL_TEMPLATE = {"urgent": "red", "normal": "orange", "info": "blue"}
 
@@ -295,6 +298,8 @@ def help_card() -> dict:
             "**我能做什么**\n\n"
             "**📊 取报表**\n"
             "「昨天的巡逻报表」「现在有哪些没处理的告警」\n\n"
+            "**📄 导出巡逻报告**\n"
+            "「导出 2026-10-14 的报告」「导出任务 T-... 的报告」；不指定范围时可在卡片选择最近一次、按天、按周、按月或指定任务。\n\n"
             "**📋 下发任务**\n"
             "「让机器人去巡逻一圈」（会先弹确认卡）\n"
             "「有哪些任务在跑」「把那个任务停了」\n\n"
@@ -321,3 +326,68 @@ def text_card(title: str, body: str, template: str = "blue") -> dict:
 
 def result_card(title: str, body: str, ok: bool = True) -> dict:
     return _card(title, "green" if ok else "red", [_md(body)])
+
+
+def patrol_report_scope_card() -> dict:
+    elements = [
+        _md("选择报告范围。明确日期或任务号时也可以直接告诉我。"),
+        _actions([
+            _button("最近一次", {"act": ACT_REPORT_SCOPE, "scope": "latest"}, "primary"),
+            _button("按天", {"act": ACT_REPORT_SCOPE, "scope": "day"}),
+            _button("按周", {"act": ACT_REPORT_SCOPE, "scope": "week"}),
+            _button("按月", {"act": ACT_REPORT_SCOPE, "scope": "month"}),
+            _button("指定任务", {"act": ACT_REPORT_SCOPE, "scope": "task"}),
+        ]),
+    ]
+    return _card("📄 导出巡逻报告", "blue", elements)
+
+
+def patrol_report_period_card(scope: str, periods: list[dict[str, str]]) -> dict:
+    titles = {"day": "选择日期", "week": "选择周", "month": "选择月份"}
+    elements = [_md("请选择一个有巡逻记录的范围。")]
+    if not periods:
+        elements.append(_md("当前没有可选范围。"))
+    else:
+        buttons = [
+            _button(
+                period["label"],
+                {
+                    "act": ACT_REPORT_PERIOD,
+                    "start_day": period["start_day"],
+                    "end_day": period["end_day"],
+                    "label": period["label"],
+                },
+                "primary" if index == 0 else "default",
+            )
+            for index, period in enumerate(periods[:5])
+        ]
+        elements.append(_actions(buttons))
+    elements.append(_actions([
+        _button("返回范围选择", {"act": ACT_REPORT_SCOPE, "scope": "menu"}),
+    ]))
+    return _card(f"📄 {titles.get(scope, '选择范围')}", "blue", elements)
+
+
+def patrol_report_task_card(runs: list[dict]) -> dict:
+    elements = [_md("选择要导出的单次巡逻任务。卡片仅列最近 10 次；更早任务可直接发送任务号。")]
+    if not runs:
+        elements.append(_md("当前没有可导出的巡逻任务。"))
+    else:
+        for run in runs[:10]:
+            started = str(run.get("started_at") or "")[:16].replace("T", " ")
+            task_id = run.get("task_id") or run.get("id", "")
+            route_name = run.get("route_name") or run.get("route_id") or "巡逻任务"
+            status = {
+                "completed": "已完成",
+                "failed": "失败",
+                "cancelled": "已取消",
+                "running": "执行中",
+            }.get(run.get("status"), run.get("status", ""))
+            elements.append(_md(f"**{started}** · `{task_id}`\n{route_name} · {status}"))
+            elements.append(_actions([
+                _button("导出这一轮", {"act": ACT_REPORT_RUN, "run_id": run["id"]}),
+            ]))
+    elements.append(_actions([
+        _button("返回范围选择", {"act": ACT_REPORT_SCOPE, "scope": "menu"}),
+    ]))
+    return _card("📄 选择巡逻任务", "blue", elements)

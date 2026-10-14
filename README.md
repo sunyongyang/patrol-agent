@@ -102,6 +102,8 @@ copy config\config.example.yaml config\config.yaml
 | `probe_camera.py` | 摄像头 + YOLO 实测（无人值守采样，评估检出率） |
 | `smoke_robot_sim.py` | 机器人模拟器冒烟测试（自动时间快进跑完一轮） |
 | `test_agent_local.py` | **脱离飞书**测编排层（LLM + 工具 + 卡片） |
+| `test_dispatch_guard.py` | 回归测试：报表/帮助指令不会触发巡逻任务准备 |
+| `test_patrol_report_scope.py` | 回归测试：巡逻 PDF 范围直出与卡片选择流程 |
 | `seed_demo.py` | 造演示历史数据 |
 | `capture_once.py` | 触发一次抓拍，打印结果图路径 |
 
@@ -202,7 +204,7 @@ YOLO COCO 80 类**覆盖不了多数安防场景**，本 Demo 只用两个算法
 - 单机单点位共享一台摄像头，两个点位的画面完全相同，靠业务标签区分
 - 历史 seed 数据无抓拍图（是脚本编的，不是真实抓拍）
 - 微信通道未接入（飞书已验证完整，微信计划下一版）
-- 支持按日导出逐点位 PDF 巡逻报告；告警明细仍可按需导出 CSV
+- 支持导出单次任务或按天/周/月汇总的逐点位 PDF 巡逻报告；未指定范围时可在卡片选择。告警明细仍可按需导出 CSV
 - 周报未实现
 - 行为判定为规则近似，非行为识别模型
 

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -27,6 +28,41 @@ from agent_service.tools import patrol as T
 log = logging.getLogger("agent_service.orchestrator")
 
 MAX_TOOL_ROUNDS = 3
+
+_REPORT_QUERY_TERMS = re.compile(
+    r"报表|报告|日报|周报|月报|导出|下载|查询|查看|获取|历史|最新一次|本次任务|功能清单"
+)
+_QUESTION_TERMS = re.compile(
+    r"有没有|是否|是不是|能不能|能否|可不可以|可以吗|要不要|怎么|如何|为什么|"
+    r"是什么意思|是什么含义|如何理解|吗|[？?]"
+)
+_PATROL_NEGATION_TERMS = re.compile(
+    r"不要|别(?:让|再|去)?|不能|不可以|不需要|无需|不用|取消|停止|不想"
+)
+_NON_COMMAND_CONTEXT_TERMS = re.compile(
+    r"[\"“”‘’「」『』]|建议|认为|觉得|听说|提到|举例|例如|比如|引用|转述|如果|假如|假设|要是|若|"
+    r"(?:领导|客户|用户|他|她|他们).{0,4}(?:说|问)"
+)
+_PATROL_START_COMMAND = re.compile(
+    r"(?:"
+    r"(?:让|叫|派|安排|调度|启动|开始|下发|执行|进行).{0,12}"
+    r"(?:机器人.{0,6})?(?:巡逻|巡检|巡视)"
+    r"|(?:帮我|请).{0,6}(?:机器人.{0,6})?(?:巡逻|巡检|巡视)"
+    r"|(?:机器人)?(?:现在)?(?:去)?(?:巡逻|巡检|巡视)(?:一圈|一次|一下|一遍)?[吧。！!]*"
+    r")"
+)
+
+
+def _explicitly_requests_patrol(text: str) -> bool:
+    """Only allow task preparation for an unambiguous start/dispatch request."""
+    if (
+        _REPORT_QUERY_TERMS.search(text)
+        or _QUESTION_TERMS.search(text)
+        or _PATROL_NEGATION_TERMS.search(text)
+        or _NON_COMMAND_CONTEXT_TERMS.search(text)
+    ):
+        return False
+    return bool(_PATROL_START_COMMAND.search(text.strip()))
 
 
 @dataclass
@@ -95,7 +131,26 @@ def _export_replies(items: list[AlertItem], condition: str) -> list[Reply]:
     ]
 
 
-def _run_tool(name: str, args: dict, chat_id: str, user_id: str) -> list[Reply]:
+def _patrol_pdf_replies(path: Any, summary: dict) -> list[Reply]:
+    if path is None:
+        return [Reply(kind="card", card=fc.result_card(
+            "📄 没有巡逻记录", f"{summary.get('day', '所选范围')} 没有可导出的巡逻轮次。", ok=False))]
+
+    caption = (
+        f"巡逻报告 PDF · {summary['day']}\n"
+        f"{summary['runs']} 轮，{summary['points']} 个点位；"
+        f"异常 {summary['abnormal']}，正常 {summary['normal']}，未完成 {summary['unfinished']}。"
+    )
+    if summary.get("image_missing"):
+        caption += f"\n有 {summary['image_missing']} 个点位的历史图片文件缺失。"
+    if summary.get("has_mock"):
+        caption += "\n报告含模拟检测数据。"
+    return [Reply(kind="file", file_path=str(path), caption=caption)]
+
+
+def _run_tool(
+    name: str, args: dict, chat_id: str, user_id: str, user_text: str
+) -> list[Reply]:
     log.info("执行工具 %s(%s)", name, json.dumps(args, ensure_ascii=False))
 
     if name == "get_daily_report":
@@ -146,6 +201,16 @@ def _run_tool(name: str, args: dict, chat_id: str, user_id: str) -> list[Reply]:
         return [Reply(kind="card", card=fc.text_card("📋 任务列表", "\n".join(lines), "blue"))]
 
     if name == "prepare_patrol_task":
+        if not _explicitly_requests_patrol(user_text):
+            log.warning("拒绝非明确巡逻指令触发任务准备：%s", user_text[:100])
+            return [Reply(
+                kind="text",
+                text=(
+                    "这条消息没有明确要求开始巡逻，我没有创建任务。"
+                    "查看日报可说「获取今天的巡逻日报」；"
+                    "下载逐点报告可说「导出今天的巡逻报告 PDF」。"
+                ),
+            )]
         pa_id, rows = T.prepare_patrol_task(
             route_id=args.get("route_id"),
             chat_id=chat_id,
@@ -221,27 +286,39 @@ def _run_tool(name: str, args: dict, chat_id: str, user_id: str) -> list[Reply]:
         return _export_replies(items, cond)
 
     if name == "export_patrol_report":
+        scope = args.get("scope")
+        task_id = args.get("task_id")
+        date = args.get("date")
+
+        if task_id:
+            build_args = {"task_id": task_id, "created_by": user_id}
+        elif scope == "latest":
+            latest = T.latest_report_runs(1, created_by=user_id)
+            if not latest:
+                return _patrol_pdf_replies(None, {"day": "所有日期"})
+            build_args = {"run_id": latest[0]["id"], "created_by": user_id}
+        elif scope == "task":
+            return [Reply(kind="card", card=fc.patrol_report_task_card(
+                T.latest_report_runs(10, created_by=user_id)))]
+        elif scope in ("day", "week", "month") and date:
+            build_args = {"day": date, "scope": scope}
+        elif date:
+            build_args = {"day": date, "scope": "day"}
+        elif scope in ("day", "week", "month"):
+            periods = T.available_report_periods(scope)
+            return [Reply(kind="card", card=fc.patrol_report_period_card(scope, periods))]
+        else:
+            return [Reply(kind="card", card=fc.patrol_report_scope_card())]
+
         try:
-            path, summary = T.build_patrol_pdf(args.get("date"))
+            path, summary = T.build_patrol_pdf(**build_args)
         except ValueError as exc:
             return [Reply(kind="card", card=fc.result_card("⚠️ 日期格式不正确", str(exc), ok=False))]
         except Exception as exc:  # noqa: BLE001
             log.exception("生成巡逻 PDF 失败")
             return [Reply(kind="card", card=fc.result_card(
                 "⚠️ PDF 报告生成失败", f"{type(exc).__name__}: {exc}", ok=False))]
-        if path is None:
-            return [Reply(kind="card", card=fc.result_card(
-                "📄 没有巡逻记录", f"{summary['day']} 没有可导出的巡逻轮次。", ok=False))]
-        caption = (
-            f"巡逻报告 PDF · {summary['day']}\n"
-            f"{summary['runs']} 轮，{summary['points']} 个点位；"
-            f"异常 {summary['abnormal']}，正常 {summary['normal']}，未完成 {summary['unfinished']}。"
-        )
-        if summary["image_missing"]:
-            caption += f"\n有 {summary['image_missing']} 个点位的历史图片文件缺失。"
-        if summary["has_mock"]:
-            caption += "\n报告含模拟检测数据。"
-        return [Reply(kind="file", file_path=str(path), caption=caption)]
+        return _patrol_pdf_replies(path, summary)
 
     if name == "show_help":
         return [Reply(kind="card", card=fc.help_card())]
@@ -290,7 +367,7 @@ def handle_text(chat_id: str, user_id: str, text: str) -> list[Reply]:
                 args = {}
 
             try:
-                out = _run_tool(name, args, chat_id, user_id)
+                out = _run_tool(name, args, chat_id, user_id, text)
             except T.ToolError as exc:
                 out = [Reply(kind="card", card=fc.result_card("⚠️ 操作未完成", str(exc), ok=False))]
             except Exception as exc:  # noqa: BLE001
@@ -434,6 +511,44 @@ def handle_card_action(chat_id: str, user_id: str, value: dict) -> ActionResult:
                 replies=_export_replies(items, f"列表所选 {len(ids)} 条"),
                 toast="已导出",
             )
+
+        if act == fc.ACT_REPORT_SCOPE:
+            scope = value.get("scope") or "menu"
+            if scope == "menu":
+                card = fc.patrol_report_scope_card()
+                return ActionResult(response_card=card, toast="")
+            if scope == "task":
+                card = fc.patrol_report_task_card(
+                    T.latest_report_runs(10, created_by=user_id)
+                )
+                return ActionResult(replies=[Reply(kind="card", card=card)], toast="")
+            if scope in ("day", "week", "month"):
+                periods = T.available_report_periods(scope)
+                card = fc.patrol_report_period_card(scope, periods)
+                return ActionResult(replies=[Reply(kind="card", card=card)], toast="")
+            if scope == "latest":
+                latest = T.latest_report_runs(1, created_by=user_id)
+                if not latest:
+                    return ActionResult(response_card=fc.result_card(
+                        "📄 没有巡逻记录", "当前没有可导出的巡逻轮次。", ok=False))
+                path, summary = T.build_patrol_pdf(
+                    run_id=latest[0]["id"], created_by=user_id
+                )
+                return ActionResult(replies=_patrol_pdf_replies(path, summary), toast="")
+
+        if act == fc.ACT_REPORT_PERIOD:
+            path, summary = T.build_patrol_pdf(
+                start_day=value["start_day"],
+                end_day=value["end_day"],
+                period_label=value.get("label"),
+            )
+            return ActionResult(replies=_patrol_pdf_replies(path, summary), toast="")
+
+        if act == fc.ACT_REPORT_RUN:
+            path, summary = T.build_patrol_pdf(
+                run_id=value["run_id"], created_by=user_id
+            )
+            return ActionResult(replies=_patrol_pdf_replies(path, summary), toast="")
 
         if act == fc.ACT_HELP:
             return ActionResult(response_card=fc.help_card(), toast="")

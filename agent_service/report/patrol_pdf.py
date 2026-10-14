@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import logging
+import re
+from calendar import monthrange
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from functools import lru_cache
 from html import escape
 from pathlib import Path
@@ -207,7 +209,7 @@ def _fit_image(path: Path, max_width: float, max_height: float) -> Image:
     return image
 
 
-def _render_pdf(path: Path, day: str, runs: list[RunReport]) -> None:
+def _render_pdf(path: Path, report_label: str, runs: list[RunReport]) -> None:
     font = _font_name()
     styles = {
         "title": ParagraphStyle(
@@ -243,7 +245,7 @@ def _render_pdf(path: Path, day: str, runs: list[RunReport]) -> None:
     body_width = page_width - 32 * mm
     story: list = [
         _paragraph("巡逻结果报告", styles["title"]),
-        _paragraph(f"报告日期：{day}", styles["subtitle"]),
+        _paragraph(f"报告范围：{report_label}", styles["subtitle"]),
     ]
 
     total_points = sum(len(run.points) for run in runs)
@@ -361,7 +363,7 @@ def _render_pdf(path: Path, day: str, runs: list[RunReport]) -> None:
         canvas.saveState()
         canvas.setFont(font, 8)
         canvas.setFillColor(colors.HexColor("#6C7C8C"))
-        canvas.drawString(16 * mm, 10 * mm, f"巡逻 Agent · {day}")
+        canvas.drawString(16 * mm, 10 * mm, f"巡逻 Agent · {report_label}")
         canvas.drawRightString(A4[0] - 16 * mm, 10 * mm, f"第 {document.page} 页")
         canvas.restoreState()
 
@@ -369,19 +371,125 @@ def _render_pdf(path: Path, day: str, runs: list[RunReport]) -> None:
         str(path), pagesize=A4,
         rightMargin=16 * mm, leftMargin=16 * mm,
         topMargin=15 * mm, bottomMargin=18 * mm,
-        title=f"巡逻结果报告 {day}", author="巡逻 Agent",
+        title=f"巡逻结果报告 {report_label}", author="巡逻 Agent",
         subject="逐轮次、逐点位巡逻结果与图像证据",
     )
     doc.build(story, onFirstPage=draw_footer, onLaterPages=draw_footer)
 
 
-def build_patrol_pdf(day: str | None = None) -> tuple[Path | None, dict]:
-    report_day = day or datetime.now().strftime("%Y-%m-%d")
-    since, until = repo.day_bounds(report_day)
-    runs = repo.list_patrol_runs(since, until)
+def latest_report_runs(
+    limit: int = 10, created_by: str | None = None
+) -> list[dict]:
+    return repo.latest_patrol_runs(limit, created_by=created_by)
+
+
+def available_report_periods(scope: str, limit: int = 6) -> list[dict[str, str]]:
+    """Return recent periods that actually contain patrol runs."""
+    runs = repo.latest_patrol_runs(500)
+    periods: dict[str, dict[str, str]] = {}
+    today = date.today()
+
+    for run in runs:
+        run_day = datetime.fromisoformat(run["started_at"]).date()
+        if scope == "day":
+            start = end = run_day
+            key = run_day.isoformat()
+            label = "今天" if run_day == today else run_day.strftime("%Y-%m-%d")
+        elif scope == "week":
+            start = run_day - timedelta(days=run_day.weekday())
+            end = start + timedelta(days=6)
+            key = start.isoformat()
+            if start <= today <= end:
+                prefix = "本周"
+            elif start == (today - timedelta(days=today.weekday() + 7)):
+                prefix = "上周"
+            else:
+                prefix = ""
+            label = f"{prefix} {start:%m-%d} 至 {end:%m-%d}".strip()
+        elif scope == "month":
+            start = run_day.replace(day=1)
+            end = run_day.replace(day=monthrange(run_day.year, run_day.month)[1])
+            key = start.strftime("%Y-%m")
+            label = start.strftime("%Y年%m月")
+        else:
+            raise ValueError(f"不支持的报表范围：{scope}")
+
+        periods.setdefault(key, {
+            "label": label,
+            "start_day": start.isoformat(),
+            "end_day": end.isoformat(),
+        })
+
+    return sorted(periods.values(), key=lambda item: item["start_day"], reverse=True)[:limit]
+
+
+def _safe_filename(value: str) -> str:
+    cleaned = re.sub(r"[^0-9A-Za-z_-]+", "_", value).strip("_")
+    return cleaned[:60] or "patrol"
+
+
+def _period_bounds(scope: str, anchor_day: str) -> tuple[str, str, str]:
+    anchor = datetime.strptime(anchor_day, "%Y-%m-%d").date()
+    if scope == "day":
+        start = end = anchor
+        label = anchor.strftime("%Y-%m-%d")
+    elif scope == "week":
+        start = anchor - timedelta(days=anchor.weekday())
+        end = start + timedelta(days=6)
+        label = f"{start:%Y-%m-%d} 至 {end:%Y-%m-%d}"
+    elif scope == "month":
+        start = anchor.replace(day=1)
+        end = anchor.replace(day=monthrange(anchor.year, anchor.month)[1])
+        label = start.strftime("%Y年%m月")
+    else:
+        raise ValueError(f"不支持的报表范围：{scope}")
+    return start.isoformat(), end.isoformat(), label
+
+
+def build_patrol_pdf(
+    day: str | None = None,
+    *,
+    scope: str = "day",
+    task_id: str | None = None,
+    run_id: str | None = None,
+    start_day: str | None = None,
+    end_day: str | None = None,
+    period_label: str | None = None,
+    created_by: str | None = None,
+) -> tuple[Path | None, dict]:
+    """Generate a PDF for one run/task or a date range."""
+    if task_id and task_id.startswith("RUN-") and not run_id:
+        run_id, task_id = task_id, None
+
+    if run_id or task_id:
+        if not created_by:
+            raise ValueError("导出单次任务报告需要发起人身份")
+        if run_id:
+            run = repo.get_patrol_run_detail(run_id, created_by=created_by)
+        else:
+            task_run = repo.run_for_task(task_id or "", created_by=created_by)
+            run = repo.get_patrol_run_detail(task_run["id"], created_by=created_by) if task_run else None
+        runs = [run] if run else []
+        report_label = f"单次任务 {task_id or run_id}"
+        file_scope = task_id or run_id or "run"
+    else:
+        if start_day or end_day:
+            if not start_day or not end_day:
+                raise ValueError("开始日期和结束日期必须同时提供")
+            if date.fromisoformat(end_day) < date.fromisoformat(start_day):
+                raise ValueError("结束日期不能早于开始日期")
+            start, end, report_label = start_day, end_day, period_label or f"{start_day} 至 {end_day}"
+        else:
+            anchor = day or datetime.now().strftime("%Y-%m-%d")
+            start, end, report_label = _period_bounds(scope, anchor)
+        since = repo.day_bounds(start)[0]
+        until = repo.day_bounds(end)[1]
+        runs = repo.list_patrol_runs(since, until)
+        file_scope = f"{start}_{end}"
+
     if not runs:
         return None, {
-            "day": report_day, "runs": 0, "points": 0, "abnormal": 0,
+            "day": report_label, "runs": 0, "points": 0, "abnormal": 0,
             "normal": 0, "unfinished": 0, "image_missing": 0, "has_mock": False,
         }
 
@@ -392,12 +500,12 @@ def build_patrol_pdf(day: str | None = None) -> tuple[Path | None, dict]:
     ]
     EXPORT_DIR.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    path = EXPORT_DIR / f"patrol_report_{report_day}_{stamp}.pdf"
-    _render_pdf(path, report_day, reports)
+    path = EXPORT_DIR / f"patrol_report_{_safe_filename(file_scope)}_{stamp}.pdf"
+    _render_pdf(path, report_label, reports)
 
     point_results = [point for run in reports for point in run.points]
     summary = {
-        "day": report_day,
+        "day": report_label,
         "runs": len(reports),
         "points": len(point_results),
         "abnormal": sum(point.status == "abnormal" for point in point_results),

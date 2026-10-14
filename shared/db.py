@@ -154,11 +154,14 @@ CREATE TABLE IF NOT EXISTS pending_action (
 );
 
 CREATE INDEX IF NOT EXISTS idx_detection_run   ON detection(run_id);
+CREATE INDEX IF NOT EXISTS idx_detection_run_created
+    ON detection(run_id, created_at, id);
 CREATE INDEX IF NOT EXISTS idx_detection_time  ON detection(created_at);
 CREATE INDEX IF NOT EXISTS idx_capture_run     ON patrol_capture(run_id, point_id);
 CREATE INDEX IF NOT EXISTS idx_alert_status    ON alert(status);
 CREATE INDEX IF NOT EXISTS idx_alert_time      ON alert(created_at);
 CREATE INDEX IF NOT EXISTS idx_run_time        ON patrol_run(started_at);
+CREATE INDEX IF NOT EXISTS idx_run_task_time   ON patrol_run(task_id, started_at);
 CREATE INDEX IF NOT EXISTS idx_pending_chat    ON pending_action(chat_id, status);
 
 -- 流水号计数器：按 (前缀, 日期) 维护，见 next_id()

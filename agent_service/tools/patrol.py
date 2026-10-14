@@ -81,11 +81,44 @@ def build_export(items: list[AlertItem], condition: str = "") -> Path:
     return csv_export.build_csv(items, condition)
 
 
-def build_patrol_pdf(day: str | None = None) -> tuple[Path | None, dict]:
-    """生成按日汇总的逐点位巡逻 PDF。"""
-    from agent_service.report.patrol_pdf import build_patrol_pdf as build
+def build_patrol_pdf(
+    day: str | None = None,
+    *,
+    scope: str = "day",
+    task_id: str | None = None,
+    run_id: str | None = None,
+    start_day: str | None = None,
+    end_day: str | None = None,
+    period_label: str | None = None,
+    created_by: str | None = None,
+) -> tuple[Path | None, dict]:
+    """生成单次任务、单轮巡逻或时间范围内的逐点位 PDF。"""
+    from agent_service.report import patrol_pdf
 
-    return build(day)
+    return patrol_pdf.build_patrol_pdf(
+        day,
+        scope=scope,
+        task_id=task_id,
+        run_id=run_id,
+        start_day=start_day,
+        end_day=end_day,
+        period_label=period_label,
+        created_by=created_by,
+    )
+
+
+def latest_report_runs(
+    limit: int = 10, created_by: str | None = None
+) -> list[dict]:
+    from agent_service.report.patrol_pdf import latest_report_runs as latest
+
+    return latest(limit, created_by=created_by)
+
+
+def available_report_periods(scope: str, limit: int = 5) -> list[dict[str, str]]:
+    from agent_service.report.patrol_pdf import available_report_periods as available
+
+    return available(scope, limit)
 
 
 def list_tasks(status: str | None = None, limit: int = 5) -> list[dict]:

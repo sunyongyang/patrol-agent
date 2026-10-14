@@ -1,7 +1,7 @@
 ---
 tags: [安防巡逻, Agent, spec, 实验项目, python]
 status: 开发中（已评审）
-version: V1.2
+version: V1.3
 date: 2026-10-14
 ---
 
@@ -286,7 +286,7 @@ class SceneMapper:
 | `capture_now` | `(point_id) -> 图片 + 检测摘要` | 手动抓拍 |
 | `handle_alert` | `(alert_id/index, action, note)` | 告警处置 |
 | `export_alerts` | `(days_back, alert_type, point_id, status, limit) -> CSV` | 告警明细导出 |
-| `export_patrol_report` | `(date) -> PDF` | 逐轮次、逐点位巡逻报告 |
+| `export_patrol_report` | `(scope, date, task_id) -> PDF / 范围选择卡` | 单次任务或按天/周/月的逐轮次、逐点位巡逻报告 |
 | `advance_patrol` | `() -> 加速结果` | 跳过当前就位等待 |
 | `show_help` | `() -> 能力卡` | 帮助 |
 
@@ -310,10 +310,12 @@ class SceneMapper:
 |---|---|---|---|
 | 日报 | runs + detections + alerts | 任务完成率、覆盖率、告警数、待处置数、离线次数 | ✅ |
 | 告警清单 | alerts | 按等级/状态/时间排序 | ✅ |
-| 巡逻结果 PDF | runs + route points + patrol_capture / detections | 每轮每点位状态、绑定算法、检测摘要、图像证据 | ✅ 按日导出 |
+| 巡逻结果 PDF | runs + route points + patrol_capture / detections | 每轮每点位状态、绑定算法、检测摘要、图像证据 | ✅ 单次任务/按天/周/月导出 |
 | 周报 | 日报聚合 | 趋势、环比、异常类型分布 | ⏸ V1.5 |
 
-巡逻 PDF 按日期汇总当天所有轮次，逐轮列出路线计划中的点位、绑定算法、阈值、检测摘要、运行状态及图片证据。异常点位使用标注帧，正常点位使用原始帧；未执行的点位标为「未完成」。旧轮次优先从 `detection` 与命名匹配的图片文件回补；没有巡逻证据的点位标为未完成，图片文件缺失会单独提示，不会推断为正常。
+巡逻 PDF 可导出单次任务，或按天、自然周（周一至周日）、自然月汇总；每轮逐点列出路线计划中的点位、绑定算法、阈值、检测摘要、运行状态及图片证据。明确日期/任务号时直接导出；未指定范围时通过飞书卡选择最近一次、按天、按周、按月或指定任务。异常点位使用标注帧，正常点位使用原始帧；未执行的点位标为「未完成」。旧轮次优先从 `detection` 与命名匹配的图片文件回补；没有巡逻证据的点位标为未完成，图片文件缺失会单独提示，不会推断为正常。
+
+单次任务/轮次报告只允许任务发起人导出；范围报告（按天/周/月）按当前共享数据生成，不区分角色。项目尚无角色/主管权限体系。
 
 **覆盖率 / 路径完成率** 的正确定义参见 [[巡逻覆盖率和路径完成率]] 与 [[安防巡逻覆盖率KPI-深度规格]]，Demo 阶段先用简化口径并在报表脚注标注。
 
@@ -471,7 +473,7 @@ pending_action(id, chat_id, user_id, intent, payload_json,
 
 ### 需要你提供/操作的前置项
 
-- [x] **飞书自建应用**：✅ 完成并实测（`cli_aa44…`（见本地 `config/config.yaml`，不随仓库分发），机器人「巡逻agent」）——长连接、收消息、发文本、发图片、发卡片、按钮回调、PATCH 更新，**7 项全通过**
+- [x] **飞书自建应用**：✅ 完成并实测（凭据仅保存在本地 `config/config.yaml`，不写入仓库），机器人「巡逻agent」——长连接、收消息、发文本、发图片、发卡片、按钮回调、PATCH 更新，**7 项全通过**
 - [x] **LLM**：✅ DeepSeek 官方 API（`deepseek-chat`），function calling 实测稳定
 - [x] 点位业务标签：✅ `P1 人员闯入·东侧通道` / `P2 通道占用·西侧通道`
 - [x] 部署位置：✅ 本机
@@ -517,6 +519,7 @@ pending_action(id, chat_id, user_id, intent, payload_json,
 | V1.0 | 2026-10-13 | **评审通过，进入开发**。8 项待决问题全部确认（§13）；前置项完成飞书应用与 LLM 接入并实测通过；新增联调发现 F1–F4 |
 | V1.1 | 2026-10-14 | 新增**附录 A · 实现现状**：记录「点位绑定算法」模型、告警抑制、数据模型实际字段、指标口径修正、实测数据、8 个已踩的坑、尚未实现清单。正文为设计意图，附录为实现事实，冲突以附录为准 |
 | V1.2 | 2026-10-14 | 对齐当前代码：明确 `person/chair` 与微信未实现状态；补充 CSV 告警导出和逐点位巡逻 PDF、`patrol_capture` 数据模型、旧轮次缺图/无证据处理与 PDF 验收；移除重复 PDF 条目及不存在的 `id_seq` 描述 |
+| V1.3 | 2026-10-14 | 巡逻 PDF 扩展为单次任务及按天/自然周/自然月；新增无范围选择卡、周期卡和指定任务卡，明确范围直出规则 |
 
 ---
 
@@ -628,6 +631,7 @@ _最后更新：2026-10-14 · 状态：开发中（已实现并可端到端演�
 | LLM 不知道当前日期 | 「昨天」被解析成训练数据里的日期 | system prompt **必须注入当前日期** |
 | 用 `event_id` 去重 | 去重失效 | 飞书官方明确：用 `message_id` 去重 |
 | 依赖 PATH 里的 python | 本机 PATH 指向另一个工具的 venv，装 torch 会污染它 | **项目独立 venv** |
+| LLM 把「下载本次任务的报告」识别成下发任务 | 日志中 `prepare_patrol_task` 被用于报告/功能查询，用户可能误点确认后真的启动巡逻 | 编排层根据原始消息校验明确的巡逻启动意图；报告、查询、帮助消息一律拒绝任务准备，并用回归测试覆盖 |
 
 ## A.7 尚未实现（如实记录，不要假装已有）
 
@@ -653,13 +657,15 @@ CSV 告警明细导出与按日巡逻 PDF 均已实现，不属于未实现项�
 | §6.1 编排主循环 | `agent_service/core/orchestrator.py` |
 | §6.4 待确认动作 | `shared/repo.py` 的 `pending_action` + `agent_service/tools/patrol.py` |
 | §6.5 巡逻结果 PDF | `agent_service/report/patrol_pdf.py` + `patrol_capture` / `detection` |
+| §6.2 任务意图安全校验 | `agent_service/core/orchestrator.py` 的 `_explicitly_requests_patrol()` + `scripts/test_dispatch_guard.py` |
 | §7.1 飞书接入 | `agent_service/im/feishu.py` |
 | §8 数据模型 | `shared/db.py`（SCHEMA）+ `shared/repo.py` |
 | §10 验收标准 | `scripts/smoke_robot_sim.py` + `scripts/test_agent_local.py` |
 
 ## A.9 巡逻 PDF 与证据口径
 
-- 报告按本地日期筛选当天所有 `patrol_run`，并按路线配置展开每个计划点位。
+- 报告可按单次任务/轮次，或按本地日期、自然周、自然月筛选 `patrol_run`，并按路线配置展开每个计划点位。
+- 单次任务/轮次查询必须带任务发起人 `created_by`；范围汇总目前按共享数据生成，因为项目尚无角色权限体系。
 - 新巡逻每完成一次抓拍就写入一条 `patrol_capture`；零检测也保存 `normal` 结果与原图路径。
 - 点位命中绑定算法且达到阈值时标记 `abnormal`，报告选用带框标注图；否则标记 `normal`，报告选用未经绘制的原始帧。
 - 尚未完成的路线点位标记「未完成」；失败/取消轮次仍显示实际完成进度。
