@@ -14,18 +14,18 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from robot_sim.detectors.base import Detection
-from shared.scene import AlertType, Point, alert_type
+from shared.scene import Algorithm, Point
 
 
 @dataclass(frozen=True)
 class AlertDecision:
     detection: Detection
-    spec: AlertType
+    spec: Algorithm
     count: int = 1          # 本次拍照里命中该目标的个数
 
     @property
     def alert_type(self) -> str:
-        return self.spec.type
+        return self.spec.alert_type
 
     @property
     def level(self) -> str:
@@ -56,8 +56,11 @@ def point_in_zone(center: tuple[float, float], zone: list[list[float]] | None) -
 def evaluate(point: Point, detections: list[Detection]) -> list[AlertDecision]:
     """从一次拍照的全部检测里，挑出应升级为告警的项。
 
-    规则（config/mapping.yaml 可改，代码不动）：
-        1. 类别 == 本点位 target_label
+    **绑定关系在这里生效**：只认本点位绑定算法的模型类别，其余一律不看。
+    所以 P2 绑的是「通道占用检测」，即使画面里检出 person 0.92 也不会报警。
+
+    规则：
+        1. 类别 == 本点位绑定算法的 coco_label
         2. 置信度 >= 本点位 conf_threshold
         3. 若点位配了 zone，则检测框中心必须落在区域内（用于「越界闯入」）
 
@@ -67,14 +70,12 @@ def evaluate(point: Point, detections: list[Detection]) -> list[AlertDecision]:
         卡片要显示「检测到 3 人」，而不是只提 1 个。
         早期版本直接 `out[:1]` 丢掉其余，对安防来说是**漏报**。
     """
-    spec = alert_type(point.target_label)
-    if spec is None:
-        # 点位配了未定义映射的类别——配置错误，静默不告警但要有迹可循
-        return []
+    spec = point.algorithm
+    bound_label = spec.coco_label
 
     matched: list[Detection] = []
     for det in detections:
-        if det.label != point.target_label:
+        if det.label != bound_label:
             continue
         if det.confidence < point.conf_threshold:
             continue
@@ -89,6 +90,17 @@ def evaluate(point: Point, detections: list[Detection]) -> list[AlertDecision]:
     return [AlertDecision(detection=matched[0], spec=spec, count=len(matched))]
 
 
+def bound_detections(point: Point, detections: list[Detection]) -> list[Detection]:
+    """只保留本点位绑定算法的检测结果 —— 上报链路只允许看到这些。
+
+    用途：结果图绘制、「拍一张照片」的文字回显。
+    与 evaluate 的区别：evaluate 还要过置信度阈值和区域判定，
+    这里只按**绑定关系**过滤（画框时想看到低于告警阈值的检出也算合理）。
+    """
+    bound = point.algorithm.coco_label
+    return [d for d in detections if d.label == bound]
+
+
 def explain(point: Point, detections: list[Detection]) -> str:
     """给日志/调试用的可读说明。"""
     if not detections:
@@ -97,6 +109,6 @@ def explain(point: Point, detections: list[Detection]) -> str:
     decisions = evaluate(point, detections)
     verdict = (
         f"→ 告警 {decisions[0].alert_type}" if decisions
-        else f"→ 无告警（本点位关心 {point.target_label}，阈值 {point.conf_threshold}）"
+        else f"→ 无告警（本点位绑定 {point.binding_label}，阈值 {point.conf_threshold}）"
     )
     return f"{point.id} {point.name}：检出 {labels} {verdict}"

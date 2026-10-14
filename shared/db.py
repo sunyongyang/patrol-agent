@@ -29,11 +29,14 @@ CREATE TABLE IF NOT EXISTS robot (
     last_seen_at  TEXT
 );
 
--- 点位：2 个，仅业务标签与目标类别不同（Spec §5.2）
+-- 点位：绑定的算法决定该点位只上报谁的检测结果（Spec §5.2）
+-- algorithm_id 指向 config/mapping.yaml 里 algorithms 的键；
+-- target_label 是派生出来的模型类别，冗余存一份便于查询与排查
 CREATE TABLE IF NOT EXISTS point (
     id             TEXT PRIMARY KEY,
     name           TEXT NOT NULL,
     area           TEXT,
+    algorithm_id   TEXT,
     target_label   TEXT NOT NULL,
     conf_threshold REAL NOT NULL DEFAULT 0.5,
     zone_json      TEXT
@@ -187,6 +190,11 @@ def _migrate(conn: sqlite3.Connection) -> None:
         if column not in alert_cols:
             conn.execute(ddl)
             print(f"[migrate] alert 表补列 {column}")
+
+    point_cols = {row["name"] for row in conn.execute("PRAGMA table_info(point)")}
+    if "algorithm_id" not in point_cols:
+        conn.execute("ALTER TABLE point ADD COLUMN algorithm_id TEXT")
+        print("[migrate] point 表补列 algorithm_id")
 
 
 # ------------------------------------------------------------------ ID 生成

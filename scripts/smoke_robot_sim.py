@@ -54,10 +54,15 @@ def main() -> int:
     if det.get("is_mock"):
         print(f"      {INFO} 模拟检测模式，结果会带 is_mock=true")
 
-    banner("2/5 路线与点位")
+    banner("2/5 点位与算法绑定")
     routes = requests.get(f"{BASE}/routes", timeout=10).json()
+    print("      算法：")
+    for a in routes.get("algorithms", []):
+        print(f"        {a['id']:<20} {a['name']:<14} {a['coco_label']:<8} → {a['alert_type']}")
+    print("      点位绑定：")
     for p in routes["points"]:
-        print(f"      点位 {p['id']} {p['name']}｜目标={p['target_label']}｜阈值={p['conf_threshold']}")
+        print(f"        {p['id']} {p['name']:<8} 绑定 {p['algorithm_name']:<12}"
+              f"（{p['coco_label']}）→ 「{p['alert_type']}」　阈值 {p['conf_threshold']}")
     for r in routes["routes"]:
         seq = " → ".join(f"{x['point_id']}({x['dwell_sec']}s)" for x in r["points"])
         print(f"      路线 {r['id']} {r['name']}：{seq}")

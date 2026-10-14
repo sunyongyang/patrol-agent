@@ -21,7 +21,7 @@ from shared import config, repo
 from shared.scene import (
     Point,
     Route,
-    alert_types,
+    algorithms,
     point as get_point,
     robot as robot_profile,
     route as get_route,
@@ -341,5 +341,7 @@ def business_context() -> str:
         f"当前日期：{now.strftime('%Y-%m-%d')}（{weekday}），当前时间 {now.strftime('%H:%M')}。\n"
         "所有相对时间（今天/昨天/上周/最近三天）都必须基于这个日期换算，不要凭记忆猜。\n"
     )
-    types = "、".join(f"{a.type}（{a.label}）" for a in alert_types().values())
+    types = "、".join(
+        f"{a.alert_type}（{a.name}·{a.coco_label}）" for a in algorithms().values()
+    )
     return f"{head}\n{describe()}\n\n告警类型映射：{types}"

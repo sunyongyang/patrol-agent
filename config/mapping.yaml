@@ -1,15 +1,17 @@
-# 巡逻 Agent Demo · 目标类别 → 安防告警语义映射
+# 巡逻 Agent Demo · 算法定义与点位绑定
 #
-# 对应 Spec §5.5。改规则不改代码。
+# 核心概念（对齐产品语境）：
+#   **算法 = 一类检测能力**，有名字、有对应的模型类别、有映射出的告警语义。
+#   **点位绑定一个算法**，该点位**只上报这个算法的检测结果**，
+#   其它类别即使被模型检出也不进上报链路（见下方 detector 配置）。
 #
-# 为什么需要这一层：
-#   YOLO 只输出 COCO 类别（person / book / ...），不知道什么是「人员闯入」。
-#   detection 表存原始 COCO 输出，alert 表存映射后的业务语义，两者分离 ——
-#   这样客户追问「你凭什么说这是人员闯入」时，能拿出原始模型输出与置信度。
+# 改配置即可改业务，不动代码。
 
-alert_types:
-  person:
-    type: "人员闯入"
+algorithms:
+  person_intrusion:
+    name: "人员闯入检测"
+    coco_label: "person"          # 对应 YOLO COCO 类别
+    alert_type: "人员闯入"
     level: "紧急"
     level_code: "urgent"
     push: true
@@ -18,8 +20,10 @@ alert_types:
     # 报表与卡片必须如实标注，不宣称具备行为识别能力。
     note: "规则近似：点位检出 person 且置信度达标即判定，未使用时序/姿态模型"
 
-  chair:
-    type: "通道占用"
+  corridor_occupancy:
+    name: "通道占用检测"
+    coco_label: "chair"
+    alert_type: "通道占用"
     level: "一般"
     level_code: "normal"
     push: true
@@ -30,9 +34,28 @@ alert_types:
 
 # 检测管道参数
 detector:
-  conf_floor: 0.35          # 低于此置信度的检测结果直接丢弃，不入库
+  conf_floor: 0.35          # 低于此置信度的结果直接丢弃
   model: "yolov8n.pt"
   allow_mock_fallback: true # 未安装 ultralytics 时降级为模拟检测并标注 is_mock
+
+  # —— 绑定关系的作用范围 ——
+  #
+  # 业务要求：点位绑定了谁，就只上报对应的检测结果。
+  #
+  # show_other_detections
+  #   算法结果图上是否绘制**非绑定算法**的检测框。
+  #   false（默认）= 图上只有该点位绑定算法的框，符合「点位只上报绑定算法结果」。
+  #   本机实测 P2 会同时检出 person 0.92 与 chair 0.46，
+  #   开着的话图上会出现一个灰框 person，与「该点位只做通道占用检测」矛盾。
+  show_other_detections: false
+  #
+  # store_all_classes
+  #   检测表里是否保留非绑定算法的原始输出。
+  #   true（默认）= 全部落库。注意这**不是「上报」**，只是内部留档：
+  #     客户追问「那个点位当时到底看到什么」时能答得出来。
+  #     上报给用户的告警与结果图始终只看绑定算法。
+  #   若希望数据模型严格做到「一个点位只有一种算法的数据」，改成 false。
+  store_all_classes: true
 
 # 告警抑制策略
 #

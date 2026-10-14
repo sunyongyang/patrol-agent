@@ -24,11 +24,12 @@ import requests
 from robot_sim.annotate import annotate
 from robot_sim.camera import Camera, CameraError, new_basename, save_jpeg
 from robot_sim.detectors.base import Detection, Detector
-from robot_sim.mapper import evaluate
+from robot_sim.mapper import bound_detections, evaluate
 from shared import IMAGE_DIR, repo
 from shared.db import now_iso
-from shared.scene import Point, Route, alert_policy, point as get_point, robot as robot_profile
-from shared.scene import route as get_route
+from shared.scene import Point, Route, alert_policy
+from shared.scene import detector as detector_profile
+from shared.scene import point as get_point, robot as robot_profile, route as get_route
 
 log = logging.getLogger("robot_sim.robot")
 
@@ -259,12 +260,21 @@ class VirtualRobot:
         # 原始帧先落盘 —— 即使后面绘制或入库失败，证据也已经保住了
         raw_path = save_jpeg(frame, IMAGE_DIR / f"{base}_raw.jpg")
 
-        # 标注帧：把算法的包围框画出来
+        # ★ 绑定关系在这里生效：本点位只上报绑定算法的检测结果。
+        # 模型是「一次推理出全类别」，但**上报链路只看绑定的那一类**。
+        prof = detector_profile()
+        bound = bound_detections(pt, detections)
+
+        # 结果图：默认只画绑定算法的框。
+        # 本机实测 P2 会同时检出 person 0.92 与 chair 0.46，
+        # 若把 person 也画上，图和「该点位只做通道占用检测」自相矛盾。
+        draw_list = detections if prof.show_other_detections else bound
         annotated = annotate(
             frame,
-            detections,
+            draw_list,
             point_id=pt.id,
             point_name=pt.name,
+            algorithm_name=pt.algorithm.name,
             target_label=pt.target_label,
             target_threshold=pt.conf_threshold,
             model_desc=self.detector.model_desc,
@@ -273,12 +283,12 @@ class VirtualRobot:
         )
         image_path = save_jpeg(annotated, IMAGE_DIR / f"{base}.jpg")
 
-        # 全类别落库（保留原始证据），点位过滤只影响是否产生告警。
-        # 必须记住「哪一个 Detection 对象对应哪一条 detection 记录」——
-        # 告警只能关联到**触发它的那一条**，不能拿列表第一个凑数。
+        # 落库：默认保留全类别原始输出（内部留档，不是「上报」）；
+        # 想严格做到「一个点位只有一种算法的数据」就改 store_all_classes: false
+        store_list = detections if prof.store_all_classes else bound
         detection_rows: list[tuple[Detection, str]] = []
         if record:
-            for d in detections:
+            for d in store_list:
                 det_id = repo.insert_detection(
                     run_id=run_id or "manual",
                     point_id=pt.id,
@@ -295,15 +305,21 @@ class VirtualRobot:
         result: dict[str, Any] = {
             "point_id": pt.id,
             "point_name": pt.name,
+            "algorithm_id": pt.algorithm_id,
+            "algorithm_name": pt.algorithm.name,
             "image_path": image_path,
             "raw_image_path": raw_path,
             "infer_ms": round(infer_ms),
-            "detections": [d.to_dict() for d in detections],
+            # ⚠️ 只返回绑定算法的检测结果 —— 这是对外的「上报」口径。
+            # 全类别原始输出在库里，可通过 /routes 与数据库查询，不从这里外泄。
+            "detections": [d.to_dict() for d in bound],
             "alert_id": None,
             "run_id": run_id,
         }
 
-        log.info("[%s] %s 推理 %.0fms 检出 %s", run_id or "manual", pt.id, infer_ms,
+        log.info("[%s] %s 绑定=%s 推理 %.0fms 命中 %s（全类别检出 %s）",
+                 run_id or "manual", pt.id, pt.binding_label, infer_ms,
+                 [(d.label, round(d.confidence, 3)) for d in bound] or "无",
                  [(d.label, round(d.confidence, 3)) for d in detections] or "无")
 
         if decisions:

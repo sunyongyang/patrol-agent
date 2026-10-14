@@ -39,9 +39,10 @@ def main() -> int:
         d = resp.json()
         dets = d.get("detections") or []
         print(f"--- {pid} {d.get('point_name')} ---")
+        print(f"    绑定算法: {d.get('algorithm_name')}（{d.get('algorithm_id')}）")
         print(f"    结果图（带框）: {d.get('image_path')}")
         print(f"    原始帧（未绘制）: {d.get('raw_image_path')}")
-        print("    检出: " + (", ".join(
+        print("    检出（仅绑定算法的结果）: " + (", ".join(
             f"{x['label']}={x['confidence']:.2f}" for x in dets) or "无"))
         print(f"    本次告警: {d.get('alert_type') or '无'}")
         print()

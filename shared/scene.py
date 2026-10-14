@@ -19,17 +19,57 @@ from shared import CONFIG_DIR
 
 
 @dataclass(frozen=True)
+class Algorithm:
+    """一个算法 = 一类检测能力。
+
+    点位**绑定**一个算法，然后只上报这个算法的检测结果。
+    这是「点位 → 算法 → 告警语义」的绑定关系的核心载体。
+    """
+
+    id: str             # 配置键，如 person_intrusion
+    name: str           # 中文名，如「人员闯入检测」
+    coco_label: str     # 对应的模型类别，如 person
+    alert_type: str     # 映射出的告警语义，如「人员闯入」
+    level: str          # 中文等级，如「紧急」
+    level_code: str     # 机器码，如 urgent
+    push: bool
+    emoji: str
+    note: str = ""
+
+
+@dataclass(frozen=True)
 class Point:
+    """巡逻点位。
+
+    `algorithm` 就是那个绑定关系 —— 该点位只上报它的结果。
+    `target_label` 是从绑定算法派生出来的模型类别，不单独配置，
+    避免出现「点位写了 person、算法却是通道占用」这种自相矛盾的配置。
+    """
+
     id: str
     name: str
     area: str
-    target_label: str
+    algorithm: Algorithm
     conf_threshold: float
     zone: list[list[float]] | None = None
 
     @property
+    def algorithm_id(self) -> str:
+        return self.algorithm.id
+
+    @property
+    def target_label(self) -> str:
+        """本点位关心的模型类别（派生自绑定算法）。"""
+        return self.algorithm.coco_label
+
+    @property
     def full_name(self) -> str:
         return f"{self.name}（{self.area}）"
+
+    @property
+    def binding_label(self) -> str:
+        """给用户看的绑定说明，如「通道占用检测（chair）」。"""
+        return f"{self.algorithm.name}（{self.algorithm.coco_label}）"
 
 
 @dataclass(frozen=True)
@@ -44,17 +84,6 @@ class Route:
     name: str
     description: str
     points: tuple[RoutePoint, ...]
-
-
-@dataclass(frozen=True)
-class AlertType:
-    label: str          # COCO 类别
-    type: str           # 安防语义，如「人员闯入」
-    level: str          # 中文等级，如「紧急」
-    level_code: str     # 机器码，如 urgent
-    push: bool
-    emoji: str
-    note: str = ""
 
 
 @dataclass(frozen=True)
@@ -78,6 +107,9 @@ class DetectorProfile:
     conf_floor: float = 0.35
     model: str = "yolov8n.pt"
     allow_mock_fallback: bool = True
+    # —— 绑定关系的作用范围 ——
+    show_other_detections: bool = False   # 结果图是否画非绑定算法的框
+    store_all_classes: bool = True        # 检测表是否保留非绑定算法的原始输出
 
 
 @dataclass(frozen=True)
@@ -134,6 +166,8 @@ def detector() -> DetectorProfile:
         conf_floor=float(d.get("conf_floor", 0.35)),
         model=d.get("model", "yolov8n.pt"),
         allow_mock_fallback=bool(d.get("allow_mock_fallback", True)),
+        show_other_detections=bool(d.get("show_other_detections", False)),
+        store_all_classes=bool(d.get("store_all_classes", True)),
     )
 
 
@@ -145,14 +179,61 @@ def alert_policy() -> AlertPolicy:
     )
 
 
+def algorithms() -> dict[str, Algorithm]:
+    """全部算法定义，键为算法 ID。"""
+    out: dict[str, Algorithm] = {}
+    for aid, a in (_mapping_doc().get("algorithms") or {}).items():
+        out[aid] = Algorithm(
+            id=aid,
+            name=a.get("name", aid),
+            coco_label=a.get("coco_label", aid),
+            alert_type=a.get("alert_type", aid),
+            level=a.get("level", "一般"),
+            level_code=a.get("level_code", "normal"),
+            push=bool(a.get("push", True)),
+            emoji=a.get("emoji", "⚠️"),
+            note=a.get("note", ""),
+        )
+    return out
+
+
+def algorithm(algorithm_id: str) -> Algorithm:
+    algs = algorithms()
+    if algorithm_id not in algs:
+        raise KeyError(
+            f"未定义的算法: {algorithm_id}（已定义: {list(algs)}）"
+        )
+    return algs[algorithm_id]
+
+
+def algorithm_for_label(coco_label: str) -> Algorithm | None:
+    """按模型类别反查算法（用于把手上的类别还原成算法）。"""
+    for a in algorithms().values():
+        if a.coco_label == coco_label:
+            return a
+    return None
+
+
 def points() -> dict[str, Point]:
+    """点位表。每个点位的算法绑定在这里解析出来。
+
+    绑定缺失或指向不存在的算法时**直接抛错**，不静默降级 ——
+    一个没绑算法的点位等于不知道要检测什么，让它早点失败比默默跑强。
+    """
     out: dict[str, Point] = {}
     for p in _routes_doc().get("points") or []:
+        aid = p.get("algorithm")
+        if not aid:
+            raise KeyError(
+                f"点位 {p.get('id')} 没有绑定算法。"
+                "请在 config/routes.yaml 里加 algorithm 字段，"
+                "取值来自 config/mapping.yaml 的 algorithms。"
+            )
         pt = Point(
             id=p["id"],
             name=p.get("name", p["id"]),
             area=p.get("area", ""),
-            target_label=p.get("target_label", ""),
+            algorithm=algorithm(aid),
             conf_threshold=float(p.get("conf_threshold", 0.5)),
             zone=p.get("zone"),
         )
@@ -193,37 +274,22 @@ def route(route_id: str) -> Route:
     return rs[route_id]
 
 
-def alert_types() -> dict[str, AlertType]:
-    out: dict[str, AlertType] = {}
-    for label, a in (_mapping_doc().get("alert_types") or {}).items():
-        out[label] = AlertType(
-            label=label,
-            type=a.get("type", label),
-            level=a.get("level", "一般"),
-            level_code=a.get("level_code", "normal"),
-            push=bool(a.get("push", True)),
-            emoji=a.get("emoji", "⚠️"),
-            note=a.get("note", ""),
-        )
-    return out
-
-
-def alert_type(label: str) -> AlertType | None:
-    return alert_types().get(label)
-
-
 def describe() -> str:
-    """给 LLM 看的业务上下文，避免它瞎猜点位和告警类型。"""
-    lines = [f"机器人：{robot().name}（{robot().id}）", "", "点位："]
+    """给 LLM 看的业务上下文，避免它瞎猜点位和算法绑定。"""
+    lines = [f"机器人：{robot().name}（{robot().id}）", "", "点位与绑定的算法："]
     for p in points().values():
-        lines.append(f"  - {p.id} {p.full_name}｜检测目标={p.target_label}｜阈值={p.conf_threshold}")
+        lines.append(
+            f"  - {p.id} {p.full_name}｜绑定算法={p.algorithm.name}"
+            f"（{p.algorithm.coco_label}）→ 告警「{p.algorithm.alert_type}」"
+            f"｜阈值={p.conf_threshold}"
+        )
     lines.append("")
     lines.append("路线：")
     for r in routes().values():
         seq = " → ".join(rp.point_id for rp in r.points)
         lines.append(f"  - {r.id} {r.name}（{seq}）")
     lines.append("")
-    lines.append("告警类型：")
-    for a in alert_types().values():
-        lines.append(f"  - {a.label} → {a.type}（{a.level}）")
+    lines.append("可用算法：")
+    for a in algorithms().values():
+        lines.append(f"  - {a.id}｜{a.name}｜模型类别 {a.coco_label} → 「{a.alert_type}」（{a.level}）")
     return "\n".join(lines)

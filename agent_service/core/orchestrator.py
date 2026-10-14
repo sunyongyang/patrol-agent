@@ -168,15 +168,23 @@ def _run_tool(name: str, args: dict, chat_id: str, user_id: str) -> list[Reply]:
     if name == "capture_now":
         point_id = args.get("point_id") or T.available_points()[0].id
         res = T.capture_now(point_id)
+        # res["detections"] 已经只含该点位绑定算法的结果（见 robot_sim/robot.py）
         dets = res.get("detections") or []
-        desc = "、".join(f"{d['label']}={d['confidence']:.2f}" for d in dets) or "未检出目标"
+        alg = res.get("algorithm_name") or ""
+        desc = (
+            "、".join(f"{d['label']}={d['confidence']:.2f}" for d in dets)
+            if dets else "未检出绑定算法的目标"
+        )
         return [
             Reply(
                 kind="image",
                 image_path=res.get("image_path"),
                 caption=f"📷 {res.get('point_name')} 算法结果图",
             ),
-            Reply(kind="text", text=f"检出：{desc}"),
+            Reply(
+                kind="text",
+                text=f"{res.get('point_name')}｜绑定算法：{alg}\n检出：{desc}",
+            ),
         ]
 
     if name == "handle_alert":

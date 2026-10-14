@@ -68,6 +68,7 @@ def annotate(
     *,
     point_id: str = "",
     point_name: str = "",
+    algorithm_name: str = "",
     target_label: str = "",
     target_threshold: float = 0.0,
     model_desc: str = "",
@@ -75,7 +76,11 @@ def annotate(
     robot_name: str = "",
     timestamp: datetime | None = None,
 ) -> np.ndarray:
-    """在帧上绘制检测框，返回新的 BGR 图像（不修改入参）。"""
+    """在帧上绘制检测框，返回新的 BGR 图像（不修改入参）。
+
+    调用方应只传入**本点位绑定算法**的检测结果（见 robot_sim/robot.py）。
+    这样图上的框与「该点位绑定了什么算法」始终一致。
+    """
     ts = timestamp or datetime.now()
     h, w = frame_bgr.shape[:2]
 
@@ -137,10 +142,11 @@ def annotate(
         base.alpha_composite(chip, (cx, cy))
         draw.text((cx + pad, cy + pad), label, font=f_box, fill=(20, 24, 30))
 
-    # ---- 底栏：模型来源与能力说明 ----
+    # ---- 底栏：模型来源与绑定说明 ----
     left = f"{model_desc or 'YOLO'}"
     if target_label:
-        left += f" · 本点位关心 {target_label}（阈值 {target_threshold}）"
+        alg = f"{algorithm_name} " if algorithm_name else ""
+        left += f" · 本点位绑定 {alg}{target_label}（阈值 {target_threshold}）"
     draw.text((int(12 * scale), h - bot_h + int(8 * scale)), left, font=f_small, fill=C_MUTED)
 
     if is_mock:

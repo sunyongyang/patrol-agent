@@ -13,7 +13,7 @@ from typing import Any
 
 from shared import db
 from shared.db import connect, next_id, now_iso
-from shared.scene import alert_types, points as all_points, robot as robot_profile, route as get_route
+from shared.scene import algorithms, points as all_points, robot as robot_profile, route as get_route
 
 
 # ==================================================================== 初始化
@@ -38,16 +38,19 @@ def ensure_base_entities() -> None:
         for p in all_points().values():
             conn.execute(
                 """
-                INSERT INTO point (id, name, area, target_label, conf_threshold, zone_json)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO point (id, name, area, algorithm_id, target_label,
+                                   conf_threshold, zone_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
-                    name=excluded.name, area=excluded.area,
+                    name=excluded.name,
+                    area=excluded.area,
+                    algorithm_id=excluded.algorithm_id,
                     target_label=excluded.target_label,
                     conf_threshold=excluded.conf_threshold,
                     zone_json=excluded.zone_json
                 """,
                 (
-                    p.id, p.name, p.area, p.target_label, p.conf_threshold,
+                    p.id, p.name, p.area, p.algorithm_id, p.target_label, p.conf_threshold,
                     json.dumps(p.zone) if p.zone else None,
                 ),
             )
@@ -675,7 +678,4 @@ def log_message(channel: str, chat_id: str, user_id: str, direction: str, conten
 def summary_line() -> str:
     """自检摘要。"""
     counts = db.table_counts()
-    alert_types_map = alert_types()
-    return (
-        f"表行数 {counts}｜告警类型 {list(alert_types_map)}"
-    )
+    return f"表行数 {counts}｜算法 {list(algorithms())}"

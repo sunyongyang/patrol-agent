@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from shared import repo
-from shared.scene import alert_types, points as all_points
+from shared.scene import algorithm_for_label, points as all_points
 
 
 @dataclass
@@ -63,7 +63,7 @@ class AlertItem:
 
     @property
     def emoji(self) -> str:
-        spec = alert_types().get(self.coco_label)
+        spec = algorithm_for_label(self.coco_label)
         return spec.emoji if spec else "⚠️"
 
     @property

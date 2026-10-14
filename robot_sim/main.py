@@ -21,7 +21,8 @@ from robot_sim.camera import Camera, CameraError
 from robot_sim.detectors import build_detector
 from robot_sim.robot import RobotBusy, VirtualRobot
 from shared import config, db, repo
-from shared.scene import camera as cam_profile, detector as det_profile, robot as robot_profile
+from shared.scene import algorithms, camera as cam_profile, detector as det_profile
+from shared.scene import robot as robot_profile
 from shared.scene import routes as all_routes, points as all_points
 
 logging.basicConfig(
@@ -117,11 +118,36 @@ def health() -> dict:
 
 @app.get("/routes")
 def list_routes() -> dict:
+    """点位与**算法绑定关系**。这是「该点位只上报什么」的唯一事实来源。"""
+    prof = det_profile()
     return {
         "robot": robot_profile().__dict__,
+        "binding_policy": {
+            "show_other_detections": prof.show_other_detections,
+            "store_all_classes": prof.store_all_classes,
+            "note": "点位只上报绑定算法的检测结果；上述两项控制结果图与落库范围",
+        },
+        "algorithms": [
+            {
+                "id": a.id,
+                "name": a.name,
+                "coco_label": a.coco_label,
+                "alert_type": a.alert_type,
+                "level": a.level,
+            }
+            for a in algorithms().values()
+        ],
         "points": [
-            {"id": p.id, "name": p.name, "area": p.area,
-             "target_label": p.target_label, "conf_threshold": p.conf_threshold}
+            {
+                "id": p.id,
+                "name": p.name,
+                "area": p.area,
+                "algorithm_id": p.algorithm_id,
+                "algorithm_name": p.algorithm.name,
+                "coco_label": p.target_label,
+                "alert_type": p.algorithm.alert_type,
+                "conf_threshold": p.conf_threshold,
+            }
             for p in all_points().values()
         ],
         "routes": [
