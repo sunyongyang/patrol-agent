@@ -89,11 +89,16 @@ if ($proxy) {
 
 # --- 3. 有没有东西可推 ---------------------------------------------------
 
+# ⚠️ PowerShell 变量名**不区分大小写**：$remote 和 $Remote 是同一个变量。
+#    这里曾经用 $remote 存 origin/main 的 SHA，把参数 $Remote（"origin"）覆盖成了
+#    一个 commit SHA，于是 git 收到 `git push <sha> main` 并报：
+#        fatal: '<sha>' does not appear to be a git repository
+#    看起来像权限/网络问题，实际是变量名撞车。所以 SHA 一律带 Sha 后缀。
 git fetch --quiet $Remote $Branch 2>$null | Out-Null
-$local  = git rev-parse HEAD 2>$null
-$remote = git rev-parse "$Remote/$Branch" 2>$null
+$localSha  = git rev-parse HEAD 2>$null
+$remoteSha = git rev-parse "$Remote/$Branch" 2>$null
 
-if ($local -and $remote -and $local -eq $remote) {
+if ($localSha -and $remoteSha -and $localSha -eq $remoteSha) {
     Write-Ok "本地与 $Remote/$Branch 一致，无需推送"
     Write-Host ""
     exit 0
@@ -105,10 +110,11 @@ if ($ahead) { Write-Step "本地领先 $ahead 个提交" }
 # --- 4. 带重试的推送 -----------------------------------------------------
 
 #   这些是认证/冲突类错误，重试基本无用。
-#   ⚠️ 注意：本机配了代理（http.proxy），代理抖动时 git 会报出
-#      「Repository not found / make sure you have the correct access rights」
-#      这种**看起来像权限问题、实际是网络问题**的错误。
-#      所以这类不放进 fatal，而是重试 + 提示先自查凭据。
+#   ⚠️ 曾把「Repository not found」误判为代理造成的假 404 而写进文档 ——
+#      实测后确认那是本脚本自己的 bug（见下方 $remoteSha 的注释），
+#      代理抖动目前**没有**证据会产生这类错误。所以这里只做重试，不做臆断。
+
+$ambiguous = @('could not read from remote repository', 'correct access rights')
 $fatal = @(
     'Authentication failed',
     'Invalid username or token',

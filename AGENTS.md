@@ -87,9 +87,9 @@ agent_service :8200  飞书长连接 + LLM 编排 + 报表 + 定时推送
 
 | 现象 | 真相 |
 |---|---|
-| `unexpected eof while reading` | 纯网络抖动，重试 |
-| **`Repository not found` / `correct access rights`** | 本机配了代理（`http.proxy=127.0.0.1:10809`），代理抖动时会返回像 404 的响应，**常常不是权限问题**。先 `gh auth status` 自查，再重试 |
+| `unexpected eof while reading` | 纯网络抖动，重试即可（实测失败率约 1/3） |
 | `schannel` 相关失败 | 系统级是 schannel，本仓库已设 `http.sslBackend=openssl`（openssl 明显更稳）。若换到别的仓库遇到同样问题，就 `git config http.sslBackend openssl` |
+| `fatal: '<40位SHA>' does not appear to be a git repository` | **PowerShell 变量名不区分大小写**导致参数被覆盖。`$remote` 和 `$Remote` 是同一个变量 —— 写脚本时 SHA 一律带 `Sha` 后缀（如 `$remoteSha`），不要用 `$remote` |
 
 凭据由 **gh CLI** 提供，且已写入**全局** git config，所以 VSCode、其它模型、其它工具都能直接用，不需要各自登录：
 
